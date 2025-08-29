@@ -163,7 +163,20 @@ export default async function Page({
       </div>
 
       {/* 一覧（4カラムまで自動で折り返し） */}
-      <ResultsGrid items={items} />
+      // 例: 一覧描画部分
+      <div className="grid gap-6 mt-6 grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
+        {items.map(v => <VideoCard key={v.id} v={v} />)}
+      </div>
+      // 例: VideoCard のサムネイル
+      <div className="relative aspect-video">
+        <img
+          src={v.thumbnailUrl ?? "/placeholder.png"}
+          alt={v.title}
+          className="absolute inset-0 h-full w-full object-cover"
+          loading="lazy"
+        />
+      </div>
+
 
       {/* ページネーション */}
       <div className="flex items-center justify-between mt-6">
@@ -192,3 +205,4 @@ export default async function Page({
     </div>
   );
 }
+
