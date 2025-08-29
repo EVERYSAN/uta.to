@@ -4,7 +4,8 @@ import { prisma } from "@/lib/prisma";
 export const dynamic = "force-dynamic";
 
 /**
- * YouTubeから「歌ってみた」を検索して Video テーブルに upsert
+ * YouTube から「歌ってみた」を収集して Video テーブルに upsert します
+ *
  * GET /api/ingest/youtube?hours=6&pages=2&q=歌ってみた&dry=1
  *  - hours: 何時間分の新着を対象 (default 6)
  *  - pages: 何ページ分取るか (default 2, 1ページ=最大50件)
@@ -29,7 +30,7 @@ export async function GET(req: Request) {
 
     const publishedAfter = new Date(Date.now() - hours * 60 * 60 * 1000).toISOString();
 
-    // 1) search.list で videoId を集める（新着順）
+    // ========== 1) search.list で videoId を収集 ==========
     let scanned = 0;
     let videoIds: string[] = [];
     let pageToken: string | undefined = undefined;
@@ -63,7 +64,7 @@ export async function GET(req: Request) {
       if (!pageToken) break;
     }
 
-    // 2) videos.list で詳細（duration/thumbnail/statisticsなど）を取得
+    // ========== 2) videos.list で詳細を取得 ==========
     let details: any[] = [];
     for (let i = 0; i < videoIds.length; i += 50) {
       const chunk = videoIds.slice(i, i + 50);
@@ -86,9 +87,6 @@ export async function GET(req: Request) {
       return NextResponse.json({ ok: true, dr: true, scanned, items: details.length });
     }
 
-    // 3) DBに upsert
-    let upserts = 0;
-
     // helper: ISO8601 duration → 秒
     const toSec = (iso?: string) => {
       if (!iso) return null;
@@ -99,6 +97,10 @@ export async function GET(req: Request) {
       const s = parseInt(m[3] ?? "0", 10);
       return h * 3600 + mi * 60 + s;
     };
+
+    // ========== 3) DB に upsert ==========
+    let upserts = 0;
+    const platform = "youtube";
 
     for (const v of details) {
       const id = v?.id as string | undefined;
@@ -121,10 +123,8 @@ export async function GET(req: Request) {
       const views = Number(v?.statistics?.viewCount ?? 0);
       const likes = Number(v?.statistics?.likeCount ?? 0);
 
-      // Prisma の型に厳密には合わせず、存在するカラムだけ更新
       const data: any = {
-        platform: "youtube",
-        platformVideoId: id,
+        // ここには「存在しているカラムだけ」入ればOK（as anyで吸収）
         title,
         description,
         url: `https://www.youtube.com/watch?v=${id}`,
@@ -133,14 +133,27 @@ export async function GET(req: Request) {
         durationSec,
         views,
         likes,
-        channelTitle, // スキーマに無くてもOK（as anyで握りつぶす）
+        channelTitle,
       };
 
       await prisma.video.upsert({
-        where: { platformVideoId: id },
-        create: data,
-        update: data,
+        // ★ 複合ユニークキー (platform, platformVideoId) を使用
+        where: {
+          platform_platformVideoId: {
+            platform,
+            platformVideoId: id,
+          },
+        },
+        create: {
+          ...data,
+          platform,
+          platformVideoId: id,
+        } as any,
+        update: {
+          ...data,
+        } as any,
       });
+
       upserts++;
     }
 
