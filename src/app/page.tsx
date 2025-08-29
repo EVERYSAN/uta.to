@@ -190,15 +190,6 @@ export default async function Page({
         ))}
       </div>
       
-      {/* サムネイル */}
-      <div className="relative aspect-video">
-        <img
-          src={v.thumbnailUrl ?? "/placeholder.png"}
-          alt={v.title}
-          className="absolute inset-0 h-full w-full object-cover"
-          loading="lazy"
-        />
-      </div>
 
 
       {/* ページネーション */}
@@ -228,5 +219,6 @@ export default async function Page({
     </div>
   );
 }
+
 
 
