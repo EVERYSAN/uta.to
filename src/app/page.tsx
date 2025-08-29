@@ -132,7 +132,7 @@ export default async function Page({
       </div>
 
       {/* 一覧（前のカードレイアウト風） */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-5">
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-6">
         {items.map((v) => (
           <a
             key={v.id}
@@ -200,3 +200,4 @@ function formatDuration(sec: number) {
   const s = String(sec % 60).padStart(2, "0");
   return `${m}:${s}`;
 }
+
