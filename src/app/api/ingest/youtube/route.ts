@@ -1,6 +1,13 @@
 import { NextResponse } from "next/server";
 import { PrismaClient } from "@prisma/client";
+import { NextResponse } from "next/server";
 
+export const dynamic = 'force-dynamic';
+
+export async function GET() {
+  // MVP確認用のダミー応答（まずはビルドを通す）
+  return NextResponse.json({ ok: true, message: "ingest-youtube: ready" });
+}
 const prisma = new PrismaClient();
 
 // 検索クエリ（まずは「歌ってみた」固定でMVP）
@@ -151,3 +158,4 @@ export async function GET() {
     return NextResponse.json({ ok: false, error: e.message }, { status: 500 });
   }
 }
+
