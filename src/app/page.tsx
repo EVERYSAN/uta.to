@@ -1,204 +1,156 @@
-// src/app/page.tsx
 import Link from "next/link";
-import { PrismaClient, Prisma } from "@prisma/client";
-
-// 型定義（UI側で使う軽量データ）
-type VideoItem = {
-  id: string;
-  platform: string;
-  platformVideoId: string;
-  title: string;
-  url: string;
-  thumbnailUrl: string | null;
-  durationSec: number | null;
-  publishedAt: string; // 表示用は string に統一
-};
-
-const prisma = new PrismaClient();
+import { prisma } from "@/lib/prisma";
 
 const PAGE_SIZE = 50;
 const MAX_TOTAL = 1000;
 
-function formatDuration(sec?: number | null) {
-  if (!sec && sec !== 0) return "";
-  const m = Math.floor(sec / 60);
-  const s = sec % 60;
-  return `${m}:${String(s).padStart(2, "0")}`;
-}
+type SearchParams = {
+  q?: string;
+  sort?: string; // new | old | views | likes
+  p?: string;    // page
+};
 
-function formatJst(iso: string) {
-  const d = new Date(iso);
-  const y = d.getFullYear();
-  const M = d.getMonth() + 1;
-  const day = d.getDate();
-  const hh = String(d.getHours()).padStart(2, "0");
-  const mm = String(d.getMinutes()).padStart(2, "0");
-  return `${y}/${M}/${day} ${hh}:${mm}`;
-}
-
-function VideoCard({ v }: { v: VideoItem }) {
-  return (
-    <article className="rounded-lg border bg-white shadow-sm overflow-hidden">
-      <a href={v.url} target="_blank" rel="noreferrer" className="block">
-        <div className="relative aspect-video">
-          <img
-            src={v.thumbnailUrl ?? "/placeholder.png"}
-            alt={v.title}
-            className="absolute inset-0 h-full w-full object-cover"
-            loading="lazy"
-          />
-        </div>
-      </a>
-
-      <div className="p-3 text-sm">
-        <div className="text-xs text-gray-500">
-          {formatJst(v.publishedAt)} ・ {formatDuration(v.durationSec)}
-        </div>
-        <a
-          href={v.url}
-          target="_blank"
-          rel="noreferrer"
-          className="mt-1 block font-medium leading-snug line-clamp-2 hover:underline"
-          title={v.title}
-        >
-          {v.title}
-        </a>
-      </div>
-    </article>
-  );
-}
-
-function ResultsGrid({ items }: { items: VideoItem[] }) {
-  return (
-    <div className="grid gap-6 mt-6 grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
-      {items.map((v) => (
-        <VideoCard key={v.id} v={v} />
-      ))}
-    </div>
-  );
+function makeQuery(base: SearchParams, patch: Partial<SearchParams>) {
+  const params = new URLSearchParams();
+  const q = (patch.q ?? base.q ?? "").toString();
+  const sort = (patch.sort ?? base.sort ?? "new").toString();
+  const p = (patch.p ?? base.p ?? "1").toString();
+  if (q) params.set("q", q);
+  if (sort) params.set("sort", sort);
+  if (p) params.set("p", p);
+  const qs = params.toString();
+  return qs ? `/?${qs}` : "/";
 }
 
 export default async function Page({
   searchParams,
 }: {
-  searchParams: { q?: string; sort?: string; p?: string };
+  searchParams?: SearchParams;
 }) {
-  const q = searchParams.q ?? "";
-  const sort = searchParams.sort ?? "new";
-  const safePage = Math.max(1, parseInt(searchParams.p ?? "1", 10) || 1);
+  const q = (searchParams?.q ?? "").trim();
+  const sort = searchParams?.sort ?? "new";
+  const page = Math.max(1, parseInt(searchParams?.p ?? "1", 10));
+  const safePage = page;
 
-  // where（大小文字無視で title/description を部分一致）
-  const where: Prisma.VideoWhereInput =
+  // where
+  const where =
     q.length > 0
       ? {
           OR: [
-            { title: { contains: q, mode: "insensitive" } },
-            { description: { contains: q, mode: "insensitive" } },
+            { title: { contains: q, mode: "insensitive" as const } },
+            { description: { contains: q, mode: "insensitive" as const } },
+            { channelTitle: { contains: q, mode: "insensitive" as const } },
           ],
         }
-      : {};
+      : undefined;
 
-  // orderBy（Prisma の SortOrder を使用）
-  const orderBy: Prisma.VideoOrderByWithRelationInput =
-    sort === "old" ? { publishedAt: "asc" } : { publishedAt: "desc" };
+  // orderBy
+  let orderBy: any = { publishedAt: "desc" as const };
+  if (sort === "old") orderBy = { publishedAt: "asc" as const };
+  else if (sort === "views") orderBy = { views: "desc" as const };
+  else if (sort === "likes") orderBy = { likes: "desc" as const };
 
-  // 総件数（最大1000件でクリップ）
-  const total = Math.min(MAX_TOTAL, await prisma.video.count({ where }));
-  const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
+  const [total, items] = await Promise.all([
+    prisma.video.count({ where }),
+    prisma.video.findMany({
+      where,
+      orderBy,
+      take: PAGE_SIZE,
+      skip: (safePage - 1) * PAGE_SIZE,
+      select: {
+        id: true,
+        platform: true,
+        platformVideoId: true,
+        title: true,
+        url: true,
+        thumbnailUrl: true,
+        durationSec: true,
+        publishedAt: true,
+        channelTitle: true,
+        views: true,
+        likes: true,
+      },
+    }),
+  ]);
 
-  // データ取得（Date → string へ変換）
-  const rows = await prisma.video.findMany({
-    where,
-    orderBy,
-    take: PAGE_SIZE,
-    skip: (safePage - 1) * PAGE_SIZE,
-    select: {
-      id: true,
-      platform: true,
-      platformVideoId: true,
-      title: true,
-      url: true,
-      thumbnailUrl: true,
-      durationSec: true,
-      publishedAt: true, // DBは Date
-    },
-  });
+  const limitedTotal = Math.min(total, MAX_TOTAL);
+  const totalPages = Math.max(1, Math.ceil(limitedTotal / PAGE_SIZE));
 
-  const items: VideoItem[] = rows.map((r) => ({
-    ...r,
-    publishedAt: r.publishedAt.toISOString(), // UIで扱いやすい形に
-  }));
-
-  // ページング用クエリ組み立て
-  const makeQuery = (params: Record<string, string>) => {
-    const sp = new URLSearchParams({ q, sort, ...params });
-    return `/?${sp.toString()}`;
-  };
+  const current: SearchParams = { q, sort, p: String(safePage) };
 
   return (
-    <div className="mx-auto max-w-7xl px-4 md:px-6 py-8">
-      <h1 className="text-2xl font-bold mb-4">歌ってみた 検索</h1>
-
+    <main className="mx-auto max-w-screen-xl px-4 py-6">
       {/* 検索フォーム */}
-      <form action="/" method="get" className="flex gap-2 mb-4">
+      <form className="mb-6 flex flex-col gap-3 sm:flex-row sm:items-center">
         <input
-          type="text"
           name="q"
           defaultValue={q}
-          placeholder="キーワード"
-          className="flex-1 border rounded px-3 py-2"
+          placeholder="キーワード（タイトル・説明・チャンネル名）"
+          className="w-full rounded border px-3 py-2"
         />
-        <select name="sort" defaultValue={sort} className="border rounded px-2 py-2">
+        <select
+          name="sort"
+          defaultValue={sort}
+          className="rounded border px-3 py-2"
+        >
           <option value="new">新着順</option>
           <option value="old">古い順</option>
-          <option value="views">再生回数順</option>
-          <option value="likes">高評価順</option>
+          <option value="views">再生数が多い順</option>
+          <option value="likes">高評価が多い順</option>
         </select>
-        <button type="submit" className="px-4 py-2 bg-black text-white rounded">
+        <button className="rounded bg-black px-4 py-2 text-white">
           検索
         </button>
       </form>
 
-      {/* ヘッダ行 */}
-      <div className="mb-2 text-sm text-gray-600">
-        ヒット {total} 件（表示 {items.length} 件） | ページ {safePage}/{totalPages}
+      {/* ヒット情報 */}
+      <div className="mb-4 text-sm text-gray-600">
+        ヒット {limitedTotal.toLocaleString()} 件（{safePage}/{totalPages}）
       </div>
 
-      {/* 一覧（4カラムまで自動で折り返し） */}
-      // 例: 一覧描画部分
-      <div className="grid gap-6 mt-6 grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
-        {items.map(v => <VideoCard key={v.id} v={v} />)}
-      </div>
-
-      {/* 一覧グリッド */}
-      <div className="grid gap-6 mt-6 grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
+      {/* 4カラムのグリッド */}
+      <div className="grid grid-cols-1 gap-6 sm:grid-cols-2 lg:grid-cols-4">
         {items.map((v) => (
-          <article key={v.id} className="border rounded-lg overflow-hidden bg-white">
+          <a
+            key={v.id}
+            href={v.url}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="block overflow-hidden rounded border shadow-sm hover:shadow-md"
+          >
             <div className="relative aspect-video">
               <img
                 src={v.thumbnailUrl ?? "/placeholder.png"}
                 alt={v.title}
-                className="absolute inset-0 w-full h-full object-cover"
+                className="absolute inset-0 h-full w-full object-cover"
                 loading="lazy"
               />
             </div>
-            <div className="p-3">
-              <div className="text-xs text-gray-500">
-                {new Date(v.publishedAt).toLocaleString("ja-JP")} ・ {v.durationSec ? `${Math.floor(v.durationSec/60)}:${String(v.durationSec%60).padStart(2,"0")}` : "-"}
+            <div className="p-2">
+              <h3 className="line-clamp-2 text-sm font-medium">{v.title}</h3>
+              <div className="mt-1 space-y-0.5 text-xs text-gray-500">
+                <div>📺 {v.channelTitle}</div>
+                <div>
+                  ⏱{" "}
+                  {v.publishedAt
+                    ? new Date(v.publishedAt).toLocaleString()
+                    : ""}
+                </div>
+                <div>
+                  👁 {v.views?.toLocaleString?.() ?? v.views}　❤️{" "}
+                  {v.likes?.toLocaleString?.() ?? v.likes}
+                </div>
               </div>
-              <h3 className="mt-1 font-medium leading-tight line-clamp-2">{v.title}</h3>
             </div>
-          </article>
+          </a>
         ))}
       </div>
-      
-
 
       {/* ページネーション */}
-      <div className="flex items-center justify-between mt-6">
+      <div className="mt-6 flex items-center justify-between">
         <Link
-          href={makeQuery({ p: String(Math.max(1, safePage - 1)) })}
-          className={`px-3 py-2 border rounded ${
+          href={makeQuery(current, { p: String(Math.max(1, safePage - 1)) })}
+          className={`rounded border px-3 py-2 ${
             safePage <= 1 ? "pointer-events-none opacity-40" : ""
           }`}
         >
@@ -206,22 +158,20 @@ export default async function Page({
         </Link>
 
         <div className="text-sm">
-          表示 {items.length} / {Math.min(MAX_TOTAL, total)} 件（{safePage}/{totalPages}）
+          表示 {items.length} / {limitedTotal} 件（{safePage}/{totalPages}）
         </div>
 
         <Link
-          href={makeQuery({ p: String(Math.min(totalPages, safePage + 1)) })}
-          className={`px-3 py-2 border rounded ${
+          href={makeQuery(current, {
+            p: String(Math.min(totalPages, safePage + 1)),
+          })}
+          className={`rounded border px-3 py-2 ${
             safePage >= totalPages ? "pointer-events-none opacity-40" : ""
           }`}
         >
           次の50件 →
         </Link>
       </div>
-    </div>
+    </main>
   );
 }
-
-
-
-
