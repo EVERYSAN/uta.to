@@ -1,0 +1,8 @@
+{
+  "crons": [
+    {
+      "path": "/api/ingest/youtube",
+      "schedule": "0 15 * * *"
+    }
+  ]
+}
