@@ -151,6 +151,8 @@ export default async function Page({
         <select name="sort" defaultValue={sort} className="border rounded px-2 py-2">
           <option value="new">新着順</option>
           <option value="old">古い順</option>
+          <option value="views">再生回数順</option>
+          <option value="likes">高評価順</option>
         </select>
         <button type="submit" className="px-4 py-2 bg-black text-white rounded">
           検索
@@ -219,6 +221,7 @@ export default async function Page({
     </div>
   );
 }
+
 
 
 
