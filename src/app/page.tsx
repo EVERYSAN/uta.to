@@ -167,7 +167,30 @@ export default async function Page({
       <div className="grid gap-6 mt-6 grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
         {items.map(v => <VideoCard key={v.id} v={v} />)}
       </div>
-      // 例: VideoCard のサムネイル
+
+      {/* 一覧グリッド */}
+      <div className="grid gap-6 mt-6 grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
+        {items.map((v) => (
+          <article key={v.id} className="border rounded-lg overflow-hidden bg-white">
+            <div className="relative aspect-video">
+              <img
+                src={v.thumbnailUrl ?? "/placeholder.png"}
+                alt={v.title}
+                className="absolute inset-0 w-full h-full object-cover"
+                loading="lazy"
+              />
+            </div>
+            <div className="p-3">
+              <div className="text-xs text-gray-500">
+                {new Date(v.publishedAt).toLocaleString("ja-JP")} ・ {v.durationSec ? `${Math.floor(v.durationSec/60)}:${String(v.durationSec%60).padStart(2,"0")}` : "-"}
+              </div>
+              <h3 className="mt-1 font-medium leading-tight line-clamp-2">{v.title}</h3>
+            </div>
+          </article>
+        ))}
+      </div>
+      
+      {/* サムネイル */}
       <div className="relative aspect-video">
         <img
           src={v.thumbnailUrl ?? "/placeholder.png"}
@@ -205,4 +228,5 @@ export default async function Page({
     </div>
   );
 }
+
 
