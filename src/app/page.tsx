@@ -1,5 +1,5 @@
-// src/app/page.tsx
 import { prisma } from "@/lib/prisma";
+import { Prisma } from "@prisma/client";   // ★ 追加
 
 export const dynamic = "force-dynamic";
 
@@ -19,22 +19,33 @@ export default async function Page({
   const q = (searchParams?.q ?? "").trim();
   const sort = searchParams?.sort ?? "new"; // new | old | len
 
-  const where =
+  // ★ Prisma.QueryMode.insensitive を使用
+  const where: Prisma.VideoWhereInput | undefined =
     q.length > 0
       ? {
           OR: [
-            { title: { contains: q, mode: "insensitive" } },
-            { description: { contains: q, mode: "insensitive" } },
+            {
+              title: {
+                contains: q,
+                mode: Prisma.QueryMode.insensitive,
+              },
+            },
+            {
+              description: {
+                contains: q,
+                mode: Prisma.QueryMode.insensitive,
+              },
+            },
           ],
         }
-      : {};
+      : undefined;
 
-  const orderBy =
+  const orderBy: Prisma.VideoOrderByWithRelationInput[] =
     sort === "old"
-      ? [{ publishedAt: "asc" as const }]
+      ? [{ publishedAt: "asc" }]
       : sort === "len"
-      ? [{ durationSec: "desc" as const }]
-      : [{ publishedAt: "desc" as const }];
+      ? [{ durationSec: "desc" }]
+      : [{ publishedAt: "desc" }];
 
   const items = await prisma.video.findMany({
     where,
@@ -63,12 +74,21 @@ export default async function Page({
           name="q"
           defaultValue={q}
           placeholder="キーワード"
-          style={{ flex: 1, padding: "10px 12px", border: "1px solid #ddd", borderRadius: 6 }}
+          style={{
+            flex: 1,
+            padding: "10px 12px",
+            border: "1px solid #ddd",
+            borderRadius: 6,
+          }}
         />
         <select
           name="sort"
           defaultValue={sort}
-          style={{ padding: "10px 12px", border: "1px solid #ddd", borderRadius: 6 }}
+          style={{
+            padding: "10px 12px",
+            border: "1px solid #ddd",
+            borderRadius: 6,
+          }}
         >
           <option value="new">新着順</option>
           <option value="old">古い順</option>
@@ -76,7 +96,12 @@ export default async function Page({
         </select>
         <button
           type="submit"
-          style={{ padding: "10px 16px", background: "#000", color: "#fff", borderRadius: 6 }}
+          style={{
+            padding: "10px 16px",
+            background: "#000",
+            color: "#fff",
+            borderRadius: 6,
+          }}
         >
           検索
         </button>
@@ -92,7 +117,13 @@ export default async function Page({
       <div style={{ marginBottom: 20 }}>
         <a
           href="/api/ingest/youtube?hours=24&pages=2"
-          style={{ padding: "10px 14px", background: "#000", color: "#fff", borderRadius: 6, textDecoration: "none" }}
+          style={{
+            padding: "10px 14px",
+            background: "#000",
+            color: "#fff",
+            borderRadius: 6,
+            textDecoration: "none",
+          }}
         >
           今すぐ収集
         </a>
@@ -110,23 +141,56 @@ export default async function Page({
         }}
       >
         {items.map((v) => (
-          <li key={v.id} style={{ border: "1px solid #eee", borderRadius: 8, overflow: "hidden" }}>
-            <a href={v.url} target="_blank" rel="noreferrer" style={{ color: "inherit", textDecoration: "none" }}>
+          <li
+            key={v.id}
+            style={{
+              border: "1px solid #eee",
+              borderRadius: 8,
+              overflow: "hidden",
+            }}
+          >
+            <a
+              href={v.url}
+              target="_blank"
+              rel="noreferrer"
+              style={{ color: "inherit", textDecoration: "none" }}
+            >
               {v.thumbnailUrl ? (
                 <img
                   src={v.thumbnailUrl}
                   alt=""
-                  style={{ width: "100%", aspectRatio: "16 / 9", objectFit: "cover", display: "block" }}
+                  style={{
+                    width: "100%",
+                    aspectRatio: "16 / 9",
+                    objectFit: "cover",
+                    display: "block",
+                  }}
                 />
               ) : (
-                <div style={{ width: "100%", aspectRatio: "16 / 9", background: "#f3f3f3" }} />
+                <div
+                  style={{
+                    width: "100%",
+                    aspectRatio: "16 / 9",
+                    background: "#f3f3f3",
+                  }}
+                />
               )}
               <div style={{ padding: 12 }}>
-                <div style={{ fontSize: 12, color: "#666", marginBottom: 6 }}>
-                  {new Date(v.publishedAt).toLocaleString("ja-JP", { timeZone: "Asia/Tokyo" })}
+                <div
+                  style={{
+                    fontSize: 12,
+                    color: "#666",
+                    marginBottom: 6,
+                  }}
+                >
+                  {new Date(v.publishedAt).toLocaleString("ja-JP", {
+                    timeZone: "Asia/Tokyo",
+                  })}
                   {v.durationSec != null && ` ・ ${fmtSec(v.durationSec)}`}
                 </div>
-                <div style={{ fontWeight: 600, lineHeight: 1.35 }}>{v.title}</div>
+                <div style={{ fontWeight: 600, lineHeight: 1.35 }}>
+                  {v.title}
+                </div>
               </div>
             </a>
           </li>
