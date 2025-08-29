@@ -162,8 +162,12 @@ export default async function Page({
         ヒット {total} 件（表示 {items.length} 件） | ページ {safePage}/{totalPages}
       </div>
 
-      {/* 一覧 */}
-      <ResultsGrid items={items} />
+      {/* 一覧（ここが重要） */}
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-6">
+        {items.map(v => (
+          <VideoCard key={v.id} v={v} />
+        ))}
+      </div>
 
       {/* ページネーション */}
       <div className="flex items-center justify-between mt-6">
@@ -192,3 +196,4 @@ export default async function Page({
     </div>
   );
 }
+
