@@ -70,8 +70,7 @@ function VideoCard({ v }: { v: VideoItem }) {
 
 function ResultsGrid({ items }: { items: VideoItem[] }) {
   return (
-    <div className="grid gap-6 mt-6
-        [grid-template-columns:repeat(auto-fill,minmax(260px,1fr))]">
+    <div className="grid gap-6 mt-6 grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
       {items.map((v) => (
         <VideoCard key={v.id} v={v} />
       ))}
@@ -163,12 +162,8 @@ export default async function Page({
         ヒット {total} 件（表示 {items.length} 件） | ページ {safePage}/{totalPages}
       </div>
 
-      {/* 一覧（ここが重要） */}
-      <div className="mx-auto max-w-screen-2xl px-4 md:px-6 py-8">
-        {items.map(v => (
-          <VideoCard key={v.id} v={v} />
-        ))}
-      </div>
+      {/* 一覧（4カラムまで自動で折り返し） */}
+      <ResultsGrid items={items} />
 
       {/* ページネーション */}
       <div className="flex items-center justify-between mt-6">
@@ -197,6 +192,3 @@ export default async function Page({
     </div>
   );
 }
-
-
-
