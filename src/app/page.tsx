@@ -21,9 +21,7 @@ export default async function Page({
   searchParams: SearchParams;
 }) {
   const q = (searchParams.q ?? "").trim();
-  const sort = (searchParams.sort === "old" ? "old" : "new") as
-    | "new"
-    | "old";
+  const sort = (searchParams.sort === "old" ? "old" : "new") as "new" | "old";
   const page = Math.max(1, Number(searchParams.p ?? 1));
 
   // where 条件（Prisma 型に素直に合わせる）
@@ -50,9 +48,7 @@ export default async function Page({
 
   // 並び順
   const orderBy: Prisma.VideoOrderByWithRelationInput =
-    sort === "old"
-      ? { publishedAt: "asc" }
-      : { publishedAt: "desc" };
+    sort === "old" ? { publishedAt: "asc" } : { publishedAt: "desc" };
 
   // 件数カウント（上限 1000 で丸め）
   const totalRaw = await prisma.video.count({ where });
@@ -114,39 +110,28 @@ export default async function Page({
           placeholder="キーワード"
           className="w-full border px-3 py-2 rounded"
         />
-        <select
-          name="sort"
-          defaultValue={sort}
-          className="border px-2 py-2 rounded"
-        >
+        <select name="sort" defaultValue={sort} className="border px-2 py-2 rounded">
           <option value="new">新着順</option>
           <option value="old">古い順</option>
         </select>
-        <button
-          type="submit"
-          className="px-4 py-2 bg-black text-white rounded"
-        >
+        <button type="submit" className="px-4 py-2 bg-black text-white rounded">
           検索
         </button>
       </form>
 
       {/* 収集ボタン（今すぐ収集） */}
       <div className="mb-2">
-        <a
-          href="/api/ingest/youtube"
-          className="inline-block px-4 py-2 border rounded hover:bg-gray-50"
-        >
+        <a href="/api/ingest/youtube" className="inline-block px-4 py-2 border rounded hover:bg-gray-50">
           今すぐ収集
         </a>
       </div>
 
       {/* 件数表示（前フォーマット風） */}
       <div className="text-sm mb-3">
-        ヒット {total} 件（表示 {items.length} 件） &nbsp;|&nbsp; ページ{" "}
-        {safePage} / {totalPages}
+        ヒット {total} 件（表示 {items.length} 件） &nbsp;|&nbsp; ページ {safePage} / {totalPages}
       </div>
 
-      {/* 一覧（前のカードレイアウト風。必要に応じて整えてね） */}
+      {/* 一覧（前のカードレイアウト風） */}
       <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-5">
         {items.map((v) => (
           <a
@@ -160,11 +145,7 @@ export default async function Page({
             <div className="aspect-video bg-gray-100">
               {v.thumbnailUrl ? (
                 // eslint-disable-next-line @next/next/no-img-element
-                <img
-                  src={v.thumbnailUrl}
-                  alt={v.title}
-                  className="w-full h-full object-cover"
-                />
+                <img src={v.thumbnailUrl} alt={v.title} className="w-full h-full object-cover" />
               ) : null}
             </div>
 
@@ -182,24 +163,19 @@ export default async function Page({
       {/* ページネーション */}
       <div className="flex items-center justify-between mt-6">
         <Link
-          href={makeQuery({ p: Math.max(1, safePage - 1) })}
-          className={`px-3 py-2 border rounded ${
-            safePage <= 1 ? "pointer-events-none opacity-40" : ""
-          }`}
+          href={makeQuery({ p: String(Math.max(1, safePage - 1)) })}
+          className={`px-3 py-2 border rounded ${safePage <= 1 ? "pointer-events-none opacity-40" : ""}`}
         >
           ← 前の50件
         </Link>
 
         <div className="text-sm">
-          表示 {items.length} / {Math.min(MAX_TOTAL, total)} 件（{safePage}/
-          {totalPages}）
+          表示 {items.length} / {Math.min(MAX_TOTAL, total)} 件（{safePage}/{totalPages}）
         </div>
 
         <Link
-          href={makeQuery({ p: Math.min(totalPages, safePage + 1) })}
-          className={`px-3 py-2 border rounded ${
-            safePage >= totalPages ? "pointer-events-none opacity-40" : ""
-          }`}
+          href={makeQuery({ p: String(Math.min(totalPages, safePage + 1)) })}
+          className={`px-3 py-2 border rounded ${safePage >= totalPages ? "pointer-events-none opacity-40" : ""}`}
         >
           次の50件 →
         </Link>
