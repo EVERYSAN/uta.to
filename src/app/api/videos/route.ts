@@ -1,51 +1,45 @@
-import { NextResponse } from "next/server";
+// src/app/api/videos/route.ts
 import { prisma } from "@/lib/prisma";
-
 export const dynamic = "force-dynamic";
 
-/**
- * GET /api/videos?q=...&sort=new&take=40
- */
 export async function GET(req: Request) {
-  try {
-    const { searchParams } = new URL(req.url);
-    const q = (searchParams.get("q") || "").trim();
-    const sort = searchParams.get("sort") || "new";
-    const take = Math.min(Number(searchParams.get("take") || 40), 100);
+  const url = new URL(req.url);
+  const q = (url.searchParams.get("q") || "").trim();
+  const sort = url.searchParams.get("sort") || "new";
+  const take = Math.min(100, Number(url.searchParams.get("take") || "50"));
 
-    let orderBy: any = { publishedAt: "desc" as const };
-    if (sort === "new") orderBy = { publishedAt: "desc" as const };
-    // ※ Video に views/likes が無い構成なので並び替えは new のみ
-
-    const where: any = q
+  const where =
+    q.length > 0
       ? {
           OR: [
             { title: { contains: q, mode: "insensitive" } },
             { description: { contains: q, mode: "insensitive" } },
-            { channelTitle: { contains: q, mode: "insensitive" } },
           ],
         }
       : {};
 
-    const items = await prisma.video.findMany({
-      where,
-      orderBy,
-      take,
-      select: {
-        id: true,
-        title: true,
-        url: true,
-        platform: true,
-        platformVideoId: true,
-        thumbnailUrl: true,
-        publishedAt: true,
-        durationSec: true as any,
-        channelTitle: true as any,
-      } as any,
-    });
+  const orderBy =
+    sort === "old"
+      ? [{ publishedAt: "asc" as const }]
+      : sort === "len"
+      ? [{ durationSec: "desc" as const }]
+      : [{ publishedAt: "desc" as const }];
 
-    return NextResponse.json({ ok: true, items });
-  } catch (e: any) {
-    return NextResponse.json({ ok: false, error: e?.message ?? String(e) }, { status: 500 });
-  }
+  const items = await prisma.video.findMany({
+    where,
+    orderBy,
+    take,
+    select: {
+      id: true,
+      title: true,
+      url: true,
+      thumbnailUrl: true,
+      publishedAt: true,
+      durationSec: true,
+    },
+  });
+  const count = await prisma.video.count({ where });
+  return new Response(JSON.stringify({ count, items }), {
+    headers: { "content-type": "application/json" },
+  });
 }
