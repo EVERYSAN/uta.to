@@ -1,10 +1,8 @@
-"use client";
-
-import { useState } from "react";
-import { PrismaClient } from "@prisma/client";
+// src/app/page.tsx
 import Link from "next/link";
+import { PrismaClient, Prisma } from "@prisma/client";
 
-// 型定義
+// 型定義（UI側で使う軽量データ）
 type VideoItem = {
   id: string;
   platform: string;
@@ -13,7 +11,7 @@ type VideoItem = {
   url: string;
   thumbnailUrl: string | null;
   durationSec: number | null;
-  publishedAt: string; // string に統一
+  publishedAt: string; // 表示用は string に統一
 };
 
 const prisma = new PrismaClient();
@@ -30,16 +28,17 @@ function formatDuration(sec?: number | null) {
 
 function formatJst(iso: string) {
   const d = new Date(iso);
-  return `${d.getFullYear()}/${d.getMonth() + 1}/${d.getDate()} ${String(
-    d.getHours()
-  ).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+  const y = d.getFullYear();
+  const M = d.getMonth() + 1;
+  const day = d.getDate();
+  const hh = String(d.getHours()).padStart(2, "0");
+  const mm = String(d.getMinutes()).padStart(2, "0");
+  return `${y}/${M}/${day} ${hh}:${mm}`;
 }
 
-// ---- VideoCard ----
 function VideoCard({ v }: { v: VideoItem }) {
   return (
     <article className="rounded-lg border bg-white shadow-sm overflow-hidden">
-      {/* サムネ（16:9固定） */}
       <a href={v.url} target="_blank" rel="noreferrer" className="block">
         <div className="relative aspect-video">
           <img
@@ -51,7 +50,6 @@ function VideoCard({ v }: { v: VideoItem }) {
         </div>
       </a>
 
-      {/* テキスト部分 */}
       <div className="p-3 text-sm">
         <div className="text-xs text-gray-500">
           {formatJst(v.publishedAt)} ・ {formatDuration(v.durationSec)}
@@ -70,12 +68,7 @@ function VideoCard({ v }: { v: VideoItem }) {
   );
 }
 
-// ---- ResultsGrid ----
-function ResultsGrid({
-  items,
-}: {
-  items: VideoItem[];
-}) {
+function ResultsGrid({ items }: { items: VideoItem[] }) {
   return (
     <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-6 mt-6">
       {items.map((v) => (
@@ -85,7 +78,6 @@ function ResultsGrid({
   );
 }
 
-// ---- Main Page ----
 export default async function Page({
   searchParams,
 }: {
@@ -95,28 +87,27 @@ export default async function Page({
   const sort = searchParams.sort ?? "new";
   const safePage = Math.max(1, parseInt(searchParams.p ?? "1", 10) || 1);
 
-  const where =
+  // where（大小文字無視で title/description を部分一致）
+  const where: Prisma.VideoWhereInput =
     q.length > 0
       ? {
           OR: [
-            { title: { contains: q, mode: "insensitive" as const } },
-            { description: { contains: q, mode: "insensitive" as const } },
+            { title: { contains: q, mode: "insensitive" } },
+            { description: { contains: q, mode: "insensitive" } },
           ],
         }
       : {};
 
-  const orderBy =
+  // orderBy（Prisma の SortOrder を使用）
+  const orderBy: Prisma.VideoOrderByWithRelationInput =
     sort === "old" ? { publishedAt: "asc" } : { publishedAt: "desc" };
 
-  const total = Math.min(
-    MAX_TOTAL,
-    await prisma.video.count({
-      where,
-    })
-  );
-  const totalPages = Math.ceil(total / PAGE_SIZE);
+  // 総件数（最大1000件でクリップ）
+  const total = Math.min(MAX_TOTAL, await prisma.video.count({ where }));
+  const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
 
-  const items = await prisma.video.findMany({
+  // データ取得（Date → string へ変換）
+  const rows = await prisma.video.findMany({
     where,
     orderBy,
     take: PAGE_SIZE,
@@ -129,16 +120,18 @@ export default async function Page({
       url: true,
       thumbnailUrl: true,
       durationSec: true,
-      publishedAt: true,
+      publishedAt: true, // DBは Date
     },
   });
 
+  const items: VideoItem[] = rows.map((r) => ({
+    ...r,
+    publishedAt: r.publishedAt.toISOString(), // UIで扱いやすい形に
+  }));
+
+  // ページング用クエリ組み立て
   const makeQuery = (params: Record<string, string>) => {
-    const sp = new URLSearchParams({
-      q,
-      sort,
-      ...params,
-    });
+    const sp = new URLSearchParams({ q, sort, ...params });
     return `/?${sp.toString()}`;
   };
 
@@ -155,26 +148,18 @@ export default async function Page({
           placeholder="キーワード"
           className="flex-1 border rounded px-3 py-2"
         />
-        <select
-          name="sort"
-          defaultValue={sort}
-          className="border rounded px-2 py-2"
-        >
+        <select name="sort" defaultValue={sort} className="border rounded px-2 py-2">
           <option value="new">新着順</option>
           <option value="old">古い順</option>
         </select>
-        <button
-          type="submit"
-          className="px-4 py-2 bg-black text-white rounded"
-        >
+        <button type="submit" className="px-4 py-2 bg-black text-white rounded">
           検索
         </button>
       </form>
 
-      {/* 検索情報 */}
+      {/* ヘッダ行 */}
       <div className="mb-2 text-sm text-gray-600">
-        ヒット {total} 件（表示 {items.length} 件） | ページ {safePage}/
-        {totalPages}
+        ヒット {total} 件（表示 {items.length} 件） | ページ {safePage}/{totalPages}
       </div>
 
       {/* 一覧 */}
@@ -192,8 +177,7 @@ export default async function Page({
         </Link>
 
         <div className="text-sm">
-          表示 {items.length} / {Math.min(MAX_TOTAL, total)} 件（{safePage}/
-          {totalPages}）
+          表示 {items.length} / {Math.min(MAX_TOTAL, total)} 件（{safePage}/{totalPages}）
         </div>
 
         <Link
