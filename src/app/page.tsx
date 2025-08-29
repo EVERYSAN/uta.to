@@ -70,7 +70,8 @@ function VideoCard({ v }: { v: VideoItem }) {
 
 function ResultsGrid({ items }: { items: VideoItem[] }) {
   return (
-    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-6 mt-6">
+    <div className="grid gap-6 mt-6
+        [grid-template-columns:repeat(auto-fill,minmax(260px,1fr))]">
       {items.map((v) => (
         <VideoCard key={v.id} v={v} />
       ))}
@@ -196,4 +197,5 @@ export default async function Page({
     </div>
   );
 }
+
 
