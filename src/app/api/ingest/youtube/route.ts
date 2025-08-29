@@ -4,13 +4,13 @@ import { prisma } from "@/lib/prisma";
 export const dynamic = "force-dynamic";
 
 /**
- * YouTube から「歌ってみた」を収集して Video テーブルに upsert します
+ * YouTube から「歌ってみた」を収集して Video テーブルに upsert
  *
  * GET /api/ingest/youtube?hours=6&pages=2&q=歌ってみた&dry=1
  *  - hours: 何時間分の新着を対象 (default 6)
  *  - pages: 何ページ分取るか (default 2, 1ページ=最大50件)
  *  - q:     検索語。未指定なら「歌ってみた」
- *  - dry=1: DBに書かず件数だけ返す（デバッグ用）
+ *  - dry=1: DBに書かず件数だけ返す
  */
 export async function GET(req: Request) {
   try {
@@ -22,15 +22,12 @@ export async function GET(req: Request) {
 
     const key = process.env.YOUTUBE_API_KEY;
     if (!key) {
-      return NextResponse.json(
-        { ok: false, error: "YOUTUBE_API_KEY is missing" },
-        { status: 500 }
-      );
+      return NextResponse.json({ ok: false, error: "YOUTUBE_API_KEY is missing" }, { status: 500 });
     }
 
     const publishedAfter = new Date(Date.now() - hours * 60 * 60 * 1000).toISOString();
 
-    // ========== 1) search.list で videoId を収集 ==========
+    // 1) search.list で videoId を収集
     let scanned = 0;
     let videoIds: string[] = [];
     let pageToken: string | undefined = undefined;
@@ -64,7 +61,7 @@ export async function GET(req: Request) {
       if (!pageToken) break;
     }
 
-    // ========== 2) videos.list で詳細を取得 ==========
+    // 2) videos.list で詳細を取得
     let details: any[] = [];
     for (let i = 0; i < videoIds.length; i += 50) {
       const chunk = videoIds.slice(i, i + 50);
@@ -87,7 +84,7 @@ export async function GET(req: Request) {
       return NextResponse.json({ ok: true, dr: true, scanned, items: details.length });
     }
 
-    // helper: ISO8601 duration → 秒
+    // ISO8601 → 秒
     const toSec = (iso?: string) => {
       if (!iso) return null;
       const m = iso.match(/PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?/);
@@ -98,8 +95,9 @@ export async function GET(req: Request) {
       return h * 3600 + mi * 60 + s;
     };
 
-    // ========== 3) DB に upsert ==========
+    // 3) DB に upsert（Video には汎用項目のみ保存）
     let upserts = 0;
+    let snapshots = 0;
     const platform = "youtube";
 
     for (const v of details) {
@@ -120,24 +118,20 @@ export async function GET(req: Request) {
         null;
 
       const durationSec = toSec(v?.contentDetails?.duration);
-      const views = Number(v?.statistics?.viewCount ?? 0);
-      const likes = Number(v?.statistics?.likeCount ?? 0);
 
-      const data: any = {
-        // ここには「存在しているカラムだけ」入ればOK（as anyで吸収）
+      // ※ Video に views/likes を書かない（スキーマに無い前提）
+      const videoData: any = {
         title,
         description,
         url: `https://www.youtube.com/watch?v=${id}`,
         thumbnailUrl,
         publishedAt,
         durationSec,
-        views,
-        likes,
         channelTitle,
       };
 
-      await prisma.video.upsert({
-        // ★ 複合ユニークキー (platform, platformVideoId) を使用
+      // upsert（複合ユニーク where）
+      const video = await prisma.video.upsert({
         where: {
           platform_platformVideoId: {
             platform,
@@ -145,19 +139,39 @@ export async function GET(req: Request) {
           },
         },
         create: {
-          ...data,
+          ...videoData,
           platform,
           platformVideoId: id,
         } as any,
         update: {
-          ...data,
+          ...videoData,
         } as any,
       });
 
       upserts++;
+
+      // 可能なら StatsSnapshot にも保存（存在しなければ何もしない）
+      try {
+        const views = Number(v?.statistics?.viewCount ?? 0);
+        const likes = Number(v?.statistics?.likeCount ?? 0);
+        const statsClient: any = (prisma as any).statsSnapshot;
+        if (statsClient?.create) {
+          await statsClient.create({
+            data: {
+              videoId: video.id,
+              views,
+              likes,
+              fetchedAt: new Date(),
+            },
+          });
+          snapshots++;
+        }
+      } catch {
+        // モデルが無い/フィールドが違う等は握りつぶし
+      }
     }
 
-    return NextResponse.json({ ok: true, scanned, upserts });
+    return NextResponse.json({ ok: true, scanned, upserts, snapshots });
   } catch (e: any) {
     console.error("ingest error:", e);
     return NextResponse.json(
