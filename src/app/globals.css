@@ -1,2 +1,8 @@
-/* global styles (空でもOK) */
-html, body { min-height: 100%; }
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* 必要なら共通スタイルをここに */
+html, body {
+  height: 100%;
+}
