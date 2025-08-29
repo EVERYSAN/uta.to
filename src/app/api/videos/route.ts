@@ -4,7 +4,7 @@ import { prisma } from "@/lib/prisma";
 export const dynamic = "force-dynamic";
 
 /**
- * GET /api/videos?q=...&sort=new|views|likes&take=40
+ * GET /api/videos?q=...&sort=new&take=40
  */
 export async function GET(req: Request) {
   try {
@@ -14,8 +14,8 @@ export async function GET(req: Request) {
     const take = Math.min(Number(searchParams.get("take") || 40), 100);
 
     let orderBy: any = { publishedAt: "desc" as const };
-    if (sort === "views") orderBy = { views: "desc" as const };
-    if (sort === "likes") orderBy = { likes: "desc" as const };
+    if (sort === "new") orderBy = { publishedAt: "desc" as const };
+    // ※ Video に views/likes が無い構成なので並び替えは new のみ
 
     const where: any = q
       ? {
@@ -39,8 +39,7 @@ export async function GET(req: Request) {
         platformVideoId: true,
         thumbnailUrl: true,
         publishedAt: true,
-        views: true as any,
-        likes: true as any,
+        durationSec: true as any,
         channelTitle: true as any,
       } as any,
     });
