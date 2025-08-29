@@ -29,6 +29,8 @@ model Video {
   url              String
   thumbnailUrl     String?
   durationSec      Int?
+  views            Int      @default(0)   
+  likes            Int      @default(0)   
   publishedAt      DateTime
   creator          Creator? @relation(fields: [creatorId], references: [id])
   creatorId        String?
@@ -52,3 +54,4 @@ model StatsSnapshot {
   comments   Int?
   bookmarks  Int?
 }
+
