@@ -29,6 +29,7 @@ model Video {
   url              String
   thumbnailUrl     String?
   durationSec      Int?
+  channelTitle    String   @default("")
   views            Int      @default(0)   
   likes            Int      @default(0)   
   publishedAt      DateTime
@@ -54,4 +55,5 @@ model StatsSnapshot {
   comments   Int?
   bookmarks  Int?
 }
+
 
