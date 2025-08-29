@@ -1,165 +1,45 @@
 import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 
-export const dynamic = "force-dynamic";
-
-/**
- * YouTube から「歌ってみた」を収集して Video テーブルに upsert
- *
- * GET /api/ingest/youtube?hours=6&pages=2&q=歌ってみた&dry=1
- *  - hours: 何時間分の新着を対象 (default 6)
- *  - pages: 何ページ分取るか (default 2, 1ページ=最大50件)
- *  - q:     検索語。未指定なら「歌ってみた」
- *  - dry=1: DBに書かず件数だけ返す
- */
-export async function GET(req: Request) {
+export async function POST(req: Request) {
   try {
-    const url = new URL(req.url);
-    const hours = Math.max(1, Number(url.searchParams.get("hours") || 6));
-    const pages = Math.max(1, Math.min(5, Number(url.searchParams.get("pages") || 2)));
-    const q = (url.searchParams.get("q") || "歌ってみた").trim();
-    const dryRun = url.searchParams.get("dry") === "1";
+    const { videoId, snippet, contentDetails, statistics } = await req.json();
 
-    const key = process.env.YOUTUBE_API_KEY;
-    if (!key) {
-      return NextResponse.json({ ok: false, error: "YOUTUBE_API_KEY is missing" }, { status: 500 });
-    }
-
-    const publishedAfter = new Date(Date.now() - hours * 60 * 60 * 1000).toISOString();
-
-    // 1) search.list で videoId を収集
-    let scanned = 0;
-    let videoIds: string[] = [];
-    let pageToken: string | undefined = undefined;
-
-    for (let i = 0; i < pages; i++) {
-      const params = new URLSearchParams({
-        key,
-        part: "snippet",
-        type: "video",
-        q,
-        order: "date",
-        maxResults: "50",
-        publishedAfter,
-      });
-      if (pageToken) params.set("pageToken", pageToken);
-
-      const res = await fetch(
-        "https://www.googleapis.com/youtube/v3/search?" + params.toString(),
-        { headers: { Accept: "application/json" }, cache: "no-store" }
-      );
-      if (!res.ok) throw new Error(`YouTube search API ${res.status}`);
-
-      const json = await res.json();
-      const ids: string[] =
-        (json.items as any[] | undefined)?.map((it) => it?.id?.videoId).filter(Boolean) ?? [];
-
-      scanned += ids.length;
-      videoIds = videoIds.concat(ids);
-
-      pageToken = json.nextPageToken;
-      if (!pageToken) break;
-    }
-
-    // 2) videos.list で詳細を取得
-    let details: any[] = [];
-    for (let i = 0; i < videoIds.length; i += 50) {
-      const chunk = videoIds.slice(i, i + 50);
-      const params = new URLSearchParams({
-        key,
-        part: "contentDetails,statistics,snippet",
-        id: chunk.join(","),
-        maxResults: "50",
-      });
-      const res = await fetch(
-        "https://www.googleapis.com/youtube/v3/videos?" + params.toString(),
-        { headers: { Accept: "application/json" }, cache: "no-store" }
-      );
-      if (!res.ok) throw new Error(`YouTube videos API ${res.status}`);
-      const json = await res.json();
-      details = details.concat(json.items ?? []);
-    }
-
-    if (dryRun) {
-      return NextResponse.json({ ok: true, dr: true, scanned, items: details.length });
-    }
-
-    // ISO8601 → 秒
-    const toSec = (iso?: string) => {
-      if (!iso) return null;
-      const m = iso.match(/PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?/);
-      if (!m) return null;
-      const h = parseInt(m[1] ?? "0", 10);
-      const mi = parseInt(m[2] ?? "0", 10);
-      const s = parseInt(m[3] ?? "0", 10);
-      return h * 3600 + mi * 60 + s;
-    };
-
-    // 3) DB に upsert（Video には存在が確実な項目だけ保存）
-    let upserts = 0;
-    let snapshots = 0; // 将来 StatsSnapshot を使う場合に備え（現状は未使用）
-    const platform = "youtube";
-
-    for (const v of details) {
-      const id = v?.id as string | undefined;
-      const sn = v?.snippet;
-      if (!id || !sn) continue;
-
-      const title = sn.title ?? "";
-      const description = sn.description ?? "";
-      const publishedAt = sn.publishedAt ? new Date(sn.publishedAt) : new Date();
-      const thumbnailUrl =
-        sn.thumbnails?.maxres?.url ||
-        sn.thumbnails?.standard?.url ||
-        sn.thumbnails?.high?.url ||
-        sn.thumbnails?.medium?.url ||
-        sn.thumbnails?.default?.url ||
-        null;
-
-      const durationSec = toSec(v?.contentDetails?.duration);
-
-      // ※ channelTitle や views/likes は Video モデルに無いので保存しない
-      // 必要になったときは Creator 関連や StatsSnapshot に持たせる
-      const videoData: any = {
-        title,
-        description,
-        url: `https://www.youtube.com/watch?v=${id}`,
-        thumbnailUrl,
-        publishedAt,
-        durationSec,
-        // 解析用に生 JSON を保持したい場合のみ（schema に rawJson がある前提）
-        rawJson: v,
-      };
-
-      await prisma.video.upsert({
-        where: {
-          platform_platformVideoId: {
-            platform,
-            platformVideoId: id,
-          },
+    const video = await prisma.video.upsert({
+      where: {
+        platform_platformVideoId: {
+          platform: "youtube",
+          platformVideoId: videoId,
         },
-        create: {
-          ...videoData,
-          platform,
-          platformVideoId: id,
-        } as any,
-        update: {
-          ...videoData,
-        } as any,
-      });
+      },
+      create: {
+        platform: "youtube",
+        platformVideoId: videoId,
+        title: snippet.title || "",
+        description: snippet.description || "",
+        url: `https://www.youtube.com/watch?v=${videoId}`,
+        thumbnailUrl: snippet.thumbnails?.high?.url || null,
+        publishedAt: snippet.publishedAt ? new Date(snippet.publishedAt) : new Date(),
+        durationSec: contentDetails?.durationSec || null,
+        channelTitle: snippet.channelTitle || "",
+        views: statistics?.viewCount ? parseInt(statistics.viewCount, 10) : 0,   // 👈 views追加
+        likes: statistics?.likeCount ? parseInt(statistics.likeCount, 10) : 0,   // 👈 likes追加
+      },
+      update: {
+        title: snippet.title || "",
+        description: snippet.description || "",
+        thumbnailUrl: snippet.thumbnails?.high?.url || null,
+        publishedAt: snippet.publishedAt ? new Date(snippet.publishedAt) : new Date(),
+        durationSec: contentDetails?.durationSec || null,
+        channelTitle: snippet.channelTitle || "",
+        views: statistics?.viewCount ? parseInt(statistics.viewCount, 10) : 0,   // 👈 更新
+        likes: statistics?.likeCount ? parseInt(statistics.likeCount, 10) : 0,   // 👈 更新
+      },
+    });
 
-      upserts++;
-
-      // もし StatsSnapshot モデルを後で使うならここに作成を追加
-      // （今はスキップ）
-    }
-
-    return NextResponse.json({ ok: true, scanned, upserts, snapshots });
-  } catch (e: any) {
-    console.error("ingest error:", e);
-    return NextResponse.json(
-      { ok: false, error: e?.message ?? String(e) },
-      { status: 500 }
-    );
+    return NextResponse.json({ success: true, video });
+  } catch (e) {
+    console.error("Ingest error:", e);
+    return NextResponse.json({ success: false, error: String(e) }, { status: 500 });
   }
 }
