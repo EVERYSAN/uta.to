@@ -164,7 +164,7 @@ export default async function Page({
       </div>
 
       {/* 一覧（ここが重要） */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-6">
+      <div className="mx-auto max-w-screen-2xl px-4 md:px-6 py-8">
         {items.map(v => (
           <VideoCard key={v.id} v={v} />
         ))}
@@ -197,5 +197,6 @@ export default async function Page({
     </div>
   );
 }
+
 
 
