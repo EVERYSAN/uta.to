@@ -95,9 +95,9 @@ export async function GET(req: Request) {
       return h * 3600 + mi * 60 + s;
     };
 
-    // 3) DB に upsert（Video には汎用項目のみ保存）
+    // 3) DB に upsert（Video には存在が確実な項目だけ保存）
     let upserts = 0;
-    let snapshots = 0;
+    let snapshots = 0; // 将来 StatsSnapshot を使う場合に備え（現状は未使用）
     const platform = "youtube";
 
     for (const v of details) {
@@ -108,7 +108,6 @@ export async function GET(req: Request) {
       const title = sn.title ?? "";
       const description = sn.description ?? "";
       const publishedAt = sn.publishedAt ? new Date(sn.publishedAt) : new Date();
-      const channelTitle = sn.channelTitle ?? "";
       const thumbnailUrl =
         sn.thumbnails?.maxres?.url ||
         sn.thumbnails?.standard?.url ||
@@ -119,7 +118,8 @@ export async function GET(req: Request) {
 
       const durationSec = toSec(v?.contentDetails?.duration);
 
-      // ※ Video に views/likes を書かない（スキーマに無い前提）
+      // ※ channelTitle や views/likes は Video モデルに無いので保存しない
+      // 必要になったときは Creator 関連や StatsSnapshot に持たせる
       const videoData: any = {
         title,
         description,
@@ -127,11 +127,11 @@ export async function GET(req: Request) {
         thumbnailUrl,
         publishedAt,
         durationSec,
-        channelTitle,
+        // 解析用に生 JSON を保持したい場合のみ（schema に rawJson がある前提）
+        rawJson: v,
       };
 
-      // upsert（複合ユニーク where）
-      const video = await prisma.video.upsert({
+      await prisma.video.upsert({
         where: {
           platform_platformVideoId: {
             platform,
@@ -150,25 +150,8 @@ export async function GET(req: Request) {
 
       upserts++;
 
-      // 可能なら StatsSnapshot にも保存（存在しなければ何もしない）
-      try {
-        const views = Number(v?.statistics?.viewCount ?? 0);
-        const likes = Number(v?.statistics?.likeCount ?? 0);
-        const statsClient: any = (prisma as any).statsSnapshot;
-        if (statsClient?.create) {
-          await statsClient.create({
-            data: {
-              videoId: video.id,
-              views,
-              likes,
-              fetchedAt: new Date(),
-            },
-          });
-          snapshots++;
-        }
-      } catch {
-        // モデルが無い/フィールドが違う等は握りつぶし
-      }
+      // もし StatsSnapshot モデルを後で使うならここに作成を追加
+      // （今はスキップ）
     }
 
     return NextResponse.json({ ok: true, scanned, upserts, snapshots });
