@@ -1,66 +1,56 @@
-// src/app/api/videos/route.ts
 import { NextResponse } from "next/server";
-import { prisma } from "@/lib/prisma";
-import { Prisma } from "@prisma/client";
+import { PrismaClient, Prisma } from "@prisma/client";
 
-export const dynamic = "force-dynamic";
+const prisma = new PrismaClient();
+
+// 1ページの件数は 50 で固定
+const PAGE_SIZE = 50;
 
 export async function GET(req: Request) {
-  try {
-    const { searchParams } = new URL(req.url);
-    const q = (searchParams.get("q") ?? "").trim();
-    const sort = searchParams.get("sort") ?? "new"; // new | old | len
-    const take = Math.min(Number(searchParams.get("take") ?? 50), 100);
+  const { searchParams } = new URL(req.url);
+  const q = (searchParams.get("q") || "").trim();
+  const sort = (searchParams.get("sort") || "newest").toLowerCase(); // newest | oldest
+  const cursor = searchParams.get("cursor"); // 次ページの開始位置（video.id）
+  // もしユーザーが limit を指定しても 50 に丸める
+  const limit = PAGE_SIZE;
 
-    // ← 型を Prisma.VideoWhereInput に、mode は Prisma.QueryMode.insensitive
-    const where: Prisma.VideoWhereInput | undefined =
-      q.length > 0
-        ? {
-            OR: [
-              {
-                title: {
-                  contains: q,
-                  mode: Prisma.QueryMode.insensitive,
-                },
-              },
-              {
-                description: {
-                  contains: q,
-                  mode: Prisma.QueryMode.insensitive,
-                },
-              },
-            ],
-          }
-        : undefined;
+  const where: Prisma.VideoWhereInput | undefined = q
+    ? {
+        OR: [
+          { title: { contains: q, mode: "insensitive" } },
+          { description: { contains: q, mode: "insensitive" } },
+        ],
+      }
+    : undefined;
 
-    const orderBy: Prisma.VideoOrderByWithRelationInput[] =
-      sort === "old"
-        ? [{ publishedAt: "asc" }]
-        : sort === "len"
-        ? [{ durationSec: "desc" }]
-        : [{ publishedAt: "desc" }];
+  const orderBy: Prisma.VideoOrderByWithRelationInput =
+    sort === "oldest" ? { publishedAt: "asc" } : { publishedAt: "desc" };
 
-    const items = await prisma.video.findMany({
-      where,
-      orderBy,
-      take,
-      select: {
-        id: true,
-        title: true,
-        url: true,
-        thumbnailUrl: true,
-        publishedAt: true,
-        durationSec: true,
-      },
-    });
+  // 1件だけ余分に取って「次があるか」を判定する
+  const items = await prisma.video.findMany({
+    where,
+    orderBy,
+    take: limit + 1,
+    ...(cursor ? { cursor: { id: cursor }, skip: 1 } : {}),
+    select: {
+      id: true,
+      title: true,
+      url: true,
+      thumbnailUrl: true,
+      platform: true,
+      platformVideoId: true,
+      publishedAt: true,
+      durationSec: true,
+    },
+  });
 
-    const total = await prisma.video.count({ where });
+  const hasMore = items.length > limit;
+  const pageItems = items.slice(0, limit);
+  const nextCursor = hasMore ? items[limit].id : null;
 
-    return NextResponse.json({ ok: true, total, items });
-  } catch (e: any) {
-    return NextResponse.json(
-      { ok: false, error: e?.message ?? String(e) },
-      { status: 500 }
-    );
-  }
+  return NextResponse.json({
+    items: pageItems,
+    nextCursor,
+    hasMore,
+  });
 }
