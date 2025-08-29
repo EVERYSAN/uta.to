@@ -1,56 +1,62 @@
 import { NextResponse } from "next/server";
-import { PrismaClient, Prisma } from "@prisma/client";
-
-const prisma = new PrismaClient();
-
-// 1ページの件数は 50 で固定
-const PAGE_SIZE = 50;
+import { prisma } from "@/lib/prisma";
 
 export async function GET(req: Request) {
   const { searchParams } = new URL(req.url);
-  const q = (searchParams.get("q") || "").trim();
-  const sort = (searchParams.get("sort") || "newest").toLowerCase(); // newest | oldest
-  const cursor = searchParams.get("cursor"); // 次ページの開始位置（video.id）
-  // もしユーザーが limit を指定しても 50 に丸める
-  const limit = PAGE_SIZE;
+  const q = searchParams.get("q") || "";
+  const page = parseInt(searchParams.get("p") || "1", 10);
+  const sort = searchParams.get("sort") || "new";
 
-  const where: Prisma.VideoWhereInput | undefined = q
-    ? {
-        OR: [
-          { title: { contains: q, mode: "insensitive" } },
-          { description: { contains: q, mode: "insensitive" } },
-        ],
-      }
-    : undefined;
+  const PAGE_SIZE = 50;
+  const skip = (page - 1) * PAGE_SIZE;
 
-  const orderBy: Prisma.VideoOrderByWithRelationInput =
-    sort === "oldest" ? { publishedAt: "asc" } : { publishedAt: "desc" };
+  // 🔍 検索条件
+  let where = {};
+  if (q) {
+    where = {
+      OR: [
+        { title: { contains: q, mode: "insensitive" } },
+        { description: { contains: q, mode: "insensitive" } },
+      ],
+    };
+  }
 
-  // 1件だけ余分に取って「次があるか」を判定する
-  const items = await prisma.video.findMany({
-    where,
-    orderBy,
-    take: limit + 1,
-    ...(cursor ? { cursor: { id: cursor }, skip: 1 } : {}),
-    select: {
-      id: true,
-      title: true,
-      url: true,
-      thumbnailUrl: true,
-      platform: true,
-      platformVideoId: true,
-      publishedAt: true,
-      durationSec: true,
-    },
-  });
+  // 🔽 並び順
+  let orderBy: any = { publishedAt: "desc" };
+  if (sort === "old") {
+    orderBy = { publishedAt: "asc" };
+  } else if (sort === "views") {
+    orderBy = { views: "desc" };   // 👈 追加
+  } else if (sort === "likes") {
+    orderBy = { likes: "desc" };   // 👈 追加
+  }
 
-  const hasMore = items.length > limit;
-  const pageItems = items.slice(0, limit);
-  const nextCursor = hasMore ? items[limit].id : null;
+  const [items, total] = await Promise.all([
+    prisma.video.findMany({
+      where,
+      orderBy,
+      skip,
+      take: PAGE_SIZE,
+      select: {
+        id: true,
+        platform: true,
+        platformVideoId: true,
+        title: true,
+        url: true,
+        thumbnailUrl: true,
+        durationSec: true,
+        publishedAt: true,
+        views: true,   // 👈 追加
+        likes: true,   // 👈 追加
+      },
+    }),
+    prisma.video.count({ where }),
+  ]);
 
   return NextResponse.json({
-    items: pageItems,
-    nextCursor,
-    hasMore,
+    items,
+    total,
+    page,
+    totalPages: Math.ceil(total / PAGE_SIZE),
   });
 }
