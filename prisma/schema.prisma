@@ -1,0 +1,51 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Creator {
+  id               String   @id @default(cuid())
+  platform         String
+  platformUserId   String
+  name             String
+  thumbnailUrl     String?
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  videos           Video[]
+  @@unique([platform, platformUserId])
+}
+
+model Video {
+  id               String   @id @default(cuid())
+  platform         String   // "youtube" | "niconico" | "twitch" など
+  platformVideoId  String
+  title            String
+  description      String?
+  url              String
+  thumbnailUrl     String?
+  durationSec      Int?
+  publishedAt      DateTime
+  creator          Creator? @relation(fields: [creatorId], references: [id])
+  creatorId        String?
+  rawJson          Json?
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  @@unique([platform, platformVideoId])
+}
+
+model StatsSnapshot {
+  id         String   @id @default(cuid())
+  video      Video    @relation(fields: [videoId], references: [id])
+  videoId    String
+  capturedAt DateTime @default(now())
+  views      Int?
+  likes      Int?
+  comments   Int?
+  bookmarks  Int?
+}
