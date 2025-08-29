@@ -1,62 +1,60 @@
 import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 
+export const dynamic = "force-dynamic";
+
 export async function GET(req: Request) {
-  const { searchParams } = new URL(req.url);
-  const q = searchParams.get("q") || "";
-  const page = parseInt(searchParams.get("p") || "1", 10);
-  const sort = searchParams.get("sort") || "new";
+  try {
+    const { searchParams } = new URL(req.url);
 
-  const PAGE_SIZE = 50;
-  const skip = (page - 1) * PAGE_SIZE;
+    const q = searchParams.get("q")?.trim() ?? "";
+    const sort = searchParams.get("sort") ?? "new"; // new | old | views | likes
+    const page = Math.max(1, parseInt(searchParams.get("page") ?? "1", 10));
+    const take = Math.min(50, Math.max(1, parseInt(searchParams.get("take") ?? "50", 10)));
 
-  // 🔍 検索条件
-  let where = {};
-  if (q) {
-    where = {
-      OR: [
-        { title: { contains: q, mode: "insensitive" } },
-        { description: { contains: q, mode: "insensitive" } },
-      ],
-    };
+    // where
+    const where =
+      q.length > 0
+        ? {
+            OR: [
+              { title: { contains: q, mode: "insensitive" as const } },
+              { description: { contains: q, mode: "insensitive" as const } },
+              { channelTitle: { contains: q, mode: "insensitive" as const } },
+            ],
+          }
+        : undefined;
+
+    // orderBy
+    let orderBy: any = { publishedAt: "desc" as const };
+    if (sort === "old") orderBy = { publishedAt: "asc" as const };
+    else if (sort === "views") orderBy = { views: "desc" as const };
+    else if (sort === "likes") orderBy = { likes: "desc" as const };
+
+    const [total, items] = await Promise.all([
+      prisma.video.count({ where }),
+      prisma.video.findMany({
+        where,
+        orderBy,
+        take,
+        skip: (page - 1) * take,
+        select: {
+          id: true,
+          platform: true,
+          platformVideoId: true,
+          title: true,
+          url: true,
+          thumbnailUrl: true,
+          durationSec: true,
+          publishedAt: true,
+          channelTitle: true,
+          views: true,
+          likes: true,
+        },
+      }),
+    ]);
+
+    return NextResponse.json({ ok: true, total, page, take, items });
+  } catch (e: any) {
+    return NextResponse.json({ ok: false, error: e?.message ?? String(e) }, { status: 500 });
   }
-
-  // 🔽 並び順
-  let orderBy: any = { publishedAt: "desc" };
-  if (sort === "old") {
-    orderBy = { publishedAt: "asc" };
-  } else if (sort === "views") {
-    orderBy = { views: "desc" };   // 👈 追加
-  } else if (sort === "likes") {
-    orderBy = { likes: "desc" };   // 👈 追加
-  }
-
-  const [items, total] = await Promise.all([
-    prisma.video.findMany({
-      where,
-      orderBy,
-      skip,
-      take: PAGE_SIZE,
-      select: {
-        id: true,
-        platform: true,
-        platformVideoId: true,
-        title: true,
-        url: true,
-        thumbnailUrl: true,
-        durationSec: true,
-        publishedAt: true,
-        views: true,   // 👈 追加
-        likes: true,   // 👈 追加
-      },
-    }),
-    prisma.video.count({ where }),
-  ]);
-
-  return NextResponse.json({
-    items,
-    total,
-    page,
-    totalPages: Math.ceil(total / PAGE_SIZE),
-  });
 }
