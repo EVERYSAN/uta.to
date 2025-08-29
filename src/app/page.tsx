@@ -1,4 +1,5 @@
 import Link from "next/link";
+import IngestNow from "@/components/IngestNow";
 export const dynamic = "force-dynamic";
 
 async function fetchVideos(q: string, sort: string) {
@@ -42,7 +43,9 @@ export default async function Home({ searchParams }: { searchParams?: { q?: stri
       {items.length === 0 && (
         <p>データがありません。まず <code>/api/ingest/youtube</code> を実行し、必要なら DB を作成してください。</p>
       )}
-
+      <div style={{ marginBottom: 16 }}>
+            <IngestNow />
+            </div>
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(240px, 1fr))", gap: 12 }}>
         {items.map((v: any) => (
           <Link key={v.id} href={`/video/${v.id}`} style={{ textDecoration: "none", color: "inherit" }}>
@@ -62,3 +65,4 @@ export default async function Home({ searchParams }: { searchParams?: { q?: stri
     </main>
   );
 }
+
