@@ -1,124 +1,71 @@
-import { NextRequest, NextResponse } from "next/server";
+// src/app/api/ingest/youtube/route.ts
+import { NextResponse } from "next/server";
 import { PrismaClient } from "@prisma/client";
+import { searchPages, fetchDetails } from "@/lib/youtube";
 
 const prisma = new PrismaClient();
-const API = "https://www.googleapis.com/youtube/v3";
 
-// PT#H#M#S → 秒
-function parseISODuration(iso?: string | null) {
-  if (!iso) return null;
-  const m = iso.match(/PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?/);
-  if (!m) return null;
-  const h = m[1] ? parseInt(m[1], 10) : 0;
-  const min = m[2] ? parseInt(m[2], 10) : 0;
-  const sec = m[3] ? parseInt(m[3], 10) : 0;
-  return h * 3600 + min * 60 + sec;
-}
-
-export async function GET(req: NextRequest) {
-  const key = process.env.YOUTUBE_API_KEY;
-  if (!key) return NextResponse.json({ ok: false, error: "MISSING_API_KEY" }, { status: 500 });
-
+// 例: /api/ingest/youtube?q=歌ってみた&maxPages=80&publishedAfter=2025-08-28T00:00:00Z&dryRun=1
+export async function GET(req: Request) {
   const { searchParams } = new URL(req.url);
   const q = searchParams.get("q") ?? "歌ってみた";
-  const maxResults = Math.min(50, Math.max(1, parseInt(searchParams.get("maxResults") ?? "50", 10)));
-  const pages = Math.min(5, Math.max(1, parseInt(searchParams.get("pages") ?? "1", 10))); // nextPageToken を追う回数
+  const maxPages = Math.min( Number(searchParams.get("maxPages") ?? "80"), 200 ); // 保険
+  const publishedAfter = searchParams.get("publishedAfter") ?? undefined;
+  const dryRun = (searchParams.get("dryRun") ?? "0") === "1";
 
-  let pageToken: string | undefined = searchParams.get("pageToken") ?? undefined;
-  let scanned = 0;
-  let upserts = 0;
+  const ids = await searchPages({ q, maxPages, publishedAfter });
+  const details = await fetchDetails(ids);
 
-  for (let i = 0; i < pages; i++) {
-    // 1) まず videoId を収集（軽量）
-    const searchUrl = new URL(`${API}/search`);
-    searchUrl.search = new URLSearchParams({
-      key,
-      q,
-      part: "id",
-      type: "video",
-      order: "date",
-      maxResults: String(maxResults),
-      ...(pageToken ? { pageToken } : {}),
-    }).toString();
+  let created = 0, updated = 0;
 
-    const sRes = await fetch(searchUrl, { cache: "no-store" });
-    const sJson = await sRes.json();
-    const ids: string[] = (sJson.items ?? []).map((it: any) => it?.id?.videoId).filter(Boolean);
-    pageToken = sJson.nextPageToken ?? undefined;
+  if (!dryRun) {
+    // Prisma の複合ユニーク: @@unique([platform, platformVideoId]) が前提
+    for (const v of details) {
+      const where = { platform_platformVideoId: { platform: "youtube", platformVideoId: v.id } };
+      const data = {
+        platform: "youtube" as const,
+        platformVideoId: v.id,
+        title: v.title,
+        url: v.url,
+        thumbnailUrl: v.thumbnailUrl,
+        channelTitle: v.channelTitle,
+        publishedAt: v.publishedAt,
+        durationSec: v.durationSec,
+        views: v.views,
+        likes: v.likes,
+      };
 
-    if (ids.length === 0) break;
-    scanned += ids.length;
-
-    // 2) 本体情報＋統計を取得
-    const videosUrl = new URL(`${API}/videos`);
-    videosUrl.search = new URLSearchParams({
-      key,
-      id: ids.join(","),
-      part: "snippet,contentDetails,statistics",
-    }).toString();
-
-    const vRes = await fetch(videosUrl, { cache: "no-store" });
-    const vJson = await vRes.json();
-
-    for (const v of vJson.items ?? []) {
-      const id = v.id as string;
-      const sn = v.snippet ?? {};
-      const det = v.contentDetails ?? {};
-      const st = v.statistics ?? {};
-
-      const title = sn.title ?? "";
-      const description = sn.description ?? "";
-      const publishedAt = sn.publishedAt ? new Date(sn.publishedAt) : new Date();
-      const thumbnailUrl =
-        sn.thumbnails?.maxres?.url ||
-        sn.thumbnails?.standard?.url ||
-        sn.thumbnails?.high?.url ||
-        sn.thumbnails?.medium?.url ||
-        sn.thumbnails?.default?.url ||
-        null;
-
-      const durationSec = parseISODuration(det.duration);
-      const channelTitle = sn.channelTitle ?? "";
-      const views = st.viewCount ? parseInt(st.viewCount, 10) : 0;
-      const likes = st.likeCount ? parseInt(st.likeCount, 10) : 0;
-
-      // 複合一意キー @@unique([platform, platformVideoId]) で upsert
       await prisma.video.upsert({
-        where: {
-          platform_platformVideoId: { platform: "youtube", platformVideoId: id },
-        },
+        where,
+        create: data,
         update: {
-          platform: "youtube",
-          title,
-          description,
-          url: `https://www.youtube.com/watch?v=${id}`,
-          thumbnailUrl,
-          durationSec,
-          publishedAt,
-          channelTitle,
-          views,
-          likes,
+          // 新着は create、既存はメタを更新（タイトル等が変わることがある）
+          title: data.title,
+          thumbnailUrl: data.thumbnailUrl,
+          channelTitle: data.channelTitle,
+          publishedAt: data.publishedAt,
+          durationSec: data.durationSec,
+          views: data.views,
+          likes: data.likes,
         },
-        create: {
-          platform: "youtube",
-          platformVideoId: id,
-          title,
-          description,
-          url: `https://www.youtube.com/watch?v=${id}`,
-          thumbnailUrl,
-          durationSec,
-          publishedAt,
-          channelTitle,
-          views,
-          likes,
-        },
+      }).then((row) => {
+        row.createdAt ? created++ : updated++;
+      }).catch((e) => {
+        // 取り込みは続行
+        console.error("[ingest] upsert error", v.id, e);
       });
-
-      upserts++;
     }
-
-    if (!pageToken) break; // これ以上ページが無ければ終了
   }
 
-  return NextResponse.json({ ok: true, scanned, upserts, nextPageToken: pageToken ?? null });
+  return NextResponse.json({
+    ok: true,
+    q,
+    maxPages,
+    publishedAfter,
+    foundIds: ids.length,
+    detailed: details.length,
+    created,
+    updated,
+    dryRun,
+  });
 }
