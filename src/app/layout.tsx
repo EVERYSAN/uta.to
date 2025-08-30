@@ -3,8 +3,20 @@ import "./globals.css";
 import type { Metadata } from "next";
 
 export const metadata: Metadata = {
-  title: "歌ってみた 検索",
-  description: "uta.to",
+  metadataBase: new URL('https://uta-to.vercel.app'),
+  title: { default: 'uta.to', template: '%s | uta.to' },
+  description: '歌ってみたを横断検索 / 新着・人気・高評価でソート可能',
+  openGraph: {
+    title: 'uta.to',
+    description: '歌ってみたを横断検索',
+    url: 'https://uta-to.vercel.app',
+    siteName: 'uta.to',
+    images: ['/og.png'],
+    locale: 'ja_JP',
+    type: 'website',
+  },
+  twitter: { card: 'summary_large_image' },
+  robots: { index: true, follow: true },
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
@@ -14,3 +26,4 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
     </html>
   );
 }
+
