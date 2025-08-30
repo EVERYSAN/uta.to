@@ -1,19 +1,18 @@
 import { NextRequest, NextResponse } from "next/server";
-import { Prisma, PrismaClient } from "@prisma/client";
+import { PrismaClient, Prisma } from "@prisma/client";
 
 const prisma = new PrismaClient();
-
-type SortKey = "new" | "old" | "views" | "likes";
 
 export async function GET(req: NextRequest) {
   const { searchParams } = new URL(req.url);
 
   const q = searchParams.get("q")?.trim() ?? "";
-  const sort = (searchParams.get("sort") as SortKey) ?? "new";
+  const sortParam = (searchParams.get("sort") ?? "new") as "new" | "old" | "views" | "likes";
   const page = Math.max(1, parseInt(searchParams.get("page") ?? "1", 10));
   const take = Math.min(50, Math.max(1, parseInt(searchParams.get("take") ?? "50", 10)));
+  const skip = (page - 1) * take;
 
-  const where: Prisma.VideoWhereInput | undefined =
+  const where =
     q.length > 0
       ? {
           OR: [
@@ -24,21 +23,30 @@ export async function GET(req: NextRequest) {
         }
       : undefined;
 
-  const orderBy: Prisma.VideoOrderByWithRelationInput | Prisma.VideoOrderByWithRelationInput[] =
-    sort === "old"
-      ? { publishedAt: "asc" }
-      : sort === "views"
-      ? [{ views: "desc" }, { publishedAt: "desc" }]
-      : sort === "likes"
-      ? [{ likes: "desc" }, { publishedAt: "desc" }]
-      : { publishedAt: "desc" };
+  let orderBy:
+    | Prisma.VideoOrderByWithRelationInput
+    | Prisma.VideoOrderByWithRelationInput[] = [{ publishedAt: "desc" }];
+
+  switch (sortParam) {
+    case "old":
+      orderBy = [{ publishedAt: "asc" }];
+      break;
+    case "views":
+      orderBy = [{ views: "desc" }, { publishedAt: "desc" }];
+      break;
+    case "likes":
+      orderBy = [{ likes: "desc" }, { publishedAt: "desc" }];
+      break;
+    default:
+      orderBy = [{ publishedAt: "desc" }];
+  }
 
   const [items, total] = await Promise.all([
     prisma.video.findMany({
       where,
       orderBy,
       take,
-      skip: (page - 1) * take,
+      skip,
       select: {
         id: true,
         platform: true,
