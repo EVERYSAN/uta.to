@@ -1,121 +1,124 @@
-// src/app/api/ingest/youtube/route.ts
 import { NextRequest, NextResponse } from "next/server";
-import { prisma } from "@/lib/prisma";
+import { PrismaClient } from "@prisma/client";
 
-const API_KEY = process.env.YOUTUBE_API_KEY!;
-const SEARCH_URL = "https://www.googleapis.com/youtube/v3/search";
-const VIDEOS_URL = "https://www.googleapis.com/youtube/v3/videos";
+const prisma = new PrismaClient();
 
-// ISO8601 の PT◯H◯M◯S を秒に
-function iso8601ToSec(iso?: string | null): number | null {
+const API = "https://www.googleapis.com/youtube/v3";
+
+function parseISODuration(iso?: string | null) {
   if (!iso) return null;
-  const m = /PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?/.exec(iso);
+  // 超簡易: PT#M#S / PT#S / PT#M
+  const m = iso.match(/PT(?:(\d+)M)?(?:(\d+)S)?/);
   if (!m) return null;
-  const h = m[1] ? parseInt(m[1], 10) : 0;
-  const mm = m[2] ? parseInt(m[2], 10) : 0;
-  const s = m[3] ? parseInt(m[3], 10) : 0;
-  return h * 3600 + mm * 60 + s;
+  const min = m[1] ? parseInt(m[1], 10) : 0;
+  const sec = m[2] ? parseInt(m[2], 10) : 0;
+  return min * 60 + sec;
 }
 
 export async function GET(req: NextRequest) {
-  if (!API_KEY) {
-    return NextResponse.json({ error: "YOUTUBE_API_KEY is missing" }, { status: 500 });
+  const key = process.env.YOUTUBE_API_KEY;
+  if (!key) {
+    return NextResponse.json({ ok: false, error: "MISSING_API_KEY" }, { status: 500 });
   }
 
   const { searchParams } = new URL(req.url);
   const q = searchParams.get("q") ?? "歌ってみた";
   const maxResults = Math.min(50, Math.max(1, parseInt(searchParams.get("maxResults") ?? "50", 10)));
-  const pageToken = searchParams.get("pageToken") ?? "";
+  const pageToken = searchParams.get("pageToken") ?? undefined;
 
-  // 1) 検索（動画IDとスニペット）
-  const sUrl =
-    `${SEARCH_URL}?key=${API_KEY}&part=snippet&type=video&order=date` +
-    `&maxResults=${maxResults}&q=${encodeURIComponent(q)}` +
-    (pageToken ? `&pageToken=${pageToken}` : "");
+  // 1) search で videoId を集める
+  const searchUrl = new URL(`${API}/search`);
+  searchUrl.search = new URLSearchParams({
+    key,
+    q,
+    part: "id",
+    type: "video",
+    maxResults: String(maxResults),
+    order: "date",
+    ...(pageToken ? { pageToken } : {}),
+  }).toString();
 
-  const sRes = await fetch(sUrl);
-  if (!sRes.ok) {
-    return NextResponse.json({ error: await sRes.text() }, { status: 500 });
-  }
-  const sJson: any = await sRes.json();
-  const items: any[] = sJson.items ?? [];
-  const ids = items.map((it) => it?.id?.videoId).filter(Boolean) as string[];
+  const sRes = await fetch(searchUrl, { cache: "no-store" });
+  const sJson = await sRes.json();
+  const ids: string[] = (sJson.items ?? [])
+    .map((it: any) => it.id?.videoId)
+    .filter(Boolean);
 
-  // 2) 統計と長さをまとめて取得（最大50件）
-  let statsMap = new Map<
-    string,
-    { views: number; likes: number; durationSec: number | null }
-  >();
-
-  if (ids.length) {
-    const vUrl = `${VIDEOS_URL}?key=${API_KEY}&part=statistics,contentDetails&id=${ids.join(",")}`;
-    const vRes = await fetch(vUrl);
-    if (!vRes.ok) {
-      return NextResponse.json({ error: await vRes.text() }, { status: 500 });
-    }
-    const vJson: any = await vRes.json();
-    for (const v of vJson.items ?? []) {
-      const id: string = v.id;
-      const st = v.statistics ?? {};
-      const cd = v.contentDetails ?? {};
-      statsMap.set(id, {
-        views: parseInt(st.viewCount ?? "0", 10) || 0,
-        likes: parseInt(st.likeCount ?? "0", 10) || 0,
-        durationSec: iso8601ToSec(cd.duration),
-      });
-    }
+  if (ids.length === 0) {
+    return NextResponse.json({ ok: true, scanned: 0, upserts: 0, nextPageToken: sJson.nextPageToken ?? null });
   }
 
-  // 3) upsert（views / likes / channelTitle も保存）
-  for (const it of items) {
-    const vid: string | undefined = it?.id?.videoId;
-    if (!vid) continue;
-    const sn = it.snippet ?? {};
-    const stats = statsMap.get(vid) ?? { views: 0, likes: 0, durationSec: null };
+  // 2) videos で詳細＋統計を取得
+  const videosUrl = new URL(`${API}/videos`);
+  videosUrl.search = new URLSearchParams({
+    key,
+    id: ids.join(","),
+    part: "snippet,contentDetails,statistics",
+  }).toString();
 
-    const title = sn.title ?? "";
-    const url = `https://www.youtube.com/watch?v=${vid}`;
-    const thumb =
-      sn?.thumbnails?.high?.url ??
-      sn?.thumbnails?.medium?.url ??
-      sn?.thumbnails?.default?.url ??
+  const vRes = await fetch(videosUrl, { cache: "no-store" });
+  const vJson = await vRes.json();
+
+  let upserts = 0;
+
+  for (const v of vJson.items ?? []) {
+    const id = v.id as string;
+    const snippet = v.snippet ?? {};
+    const contentDetails = v.contentDetails ?? {};
+    const statistics = v.statistics ?? {};
+
+    const title = snippet.title ?? "";
+    const description = snippet.description ?? "";
+    const publishedAt = snippet.publishedAt ? new Date(snippet.publishedAt) : new Date();
+    const thumbnailUrl =
+      snippet.thumbnails?.maxres?.url ||
+      snippet.thumbnails?.standard?.url ||
+      snippet.thumbnails?.high?.url ||
+      snippet.thumbnails?.medium?.url ||
+      snippet.thumbnails?.default?.url ||
       null;
-    const publishedAt = sn.publishedAt ? new Date(sn.publishedAt) : new Date();
-    const channelTitle = sn.channelTitle ?? "";
+
+    const durationSec = parseISODuration(contentDetails.duration);
+    const channelTitle = snippet.channelTitle ?? "";
+
+    const views = statistics.viewCount ? parseInt(statistics.viewCount, 10) : 0;
+    const likes = statistics.likeCount ? parseInt(statistics.likeCount, 10) : 0;
 
     await prisma.video.upsert({
-      where: {
-        platform_platformVideoId: {
-          platform: "YOUTUBE",
-          platformVideoId: vid,
-        },
+      where: { platformVideoId: id },
+      update: {
+        platform: "youtube",
+        title,
+        description,
+        url: `https://www.youtube.com/watch?v=${id}`,
+        thumbnailUrl,
+        durationSec,
+        publishedAt,
+        channelTitle,
+        views,
+        likes,
       },
       create: {
-        platform: "YOUTUBE",
-        platformVideoId: vid,
+        platform: "youtube",
+        platformVideoId: id,
         title,
-        url,
-        thumbnailUrl: thumb,
-        durationSec: stats.durationSec,
+        description,
+        url: `https://www.youtube.com/watch?v=${id}`,
+        thumbnailUrl,
+        durationSec,
         publishedAt,
         channelTitle,
-        views: stats.views,
-        likes: stats.likes,
-      },
-      update: {
-        title,
-        thumbnailUrl: thumb,
-        durationSec: stats.durationSec,
-        publishedAt,
-        channelTitle,
-        views: stats.views,
-        likes: stats.likes,
+        views,
+        likes,
       },
     });
+    upserts++;
   }
 
   return NextResponse.json({
-    saved: ids.length,
+    ok: true,
+    scanned: ids.length,
+    upserts,
     nextPageToken: sJson.nextPageToken ?? null,
   });
 }
