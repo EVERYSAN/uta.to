@@ -6,14 +6,15 @@ const MAX_TOTAL = 1000;
 
 type SearchParams = {
   q?: string;
-  sort?: string; // new | old | views | likes
-  p?: string;    // page
+  sort?: "new" | "old" | "views" | "likes";
+  p?: string; // page
 };
 
+// クエリ文字列生成（searchParams を参照しない）
 function makeQuery(base: SearchParams, patch: Partial<SearchParams>) {
   const params = new URLSearchParams();
   const q = (patch.q ?? base.q ?? "").toString();
-  const sort = searchParams?.sort ?? "new";
+  const sort = (patch.sort ?? base.sort ?? "new").toString();
   const p = (patch.p ?? base.p ?? "1").toString();
   if (q) params.set("q", q);
   if (sort) params.set("sort", sort);
@@ -28,7 +29,7 @@ export default async function Page({
   searchParams?: SearchParams;
 }) {
   const q = (searchParams?.q ?? "").trim();
-  const sort = searchParams?.sort ?? "new";
+  const sort = (searchParams?.sort ?? "new") as SearchParams["sort"];
   const page = Math.max(1, parseInt(searchParams?.p ?? "1", 10));
   const safePage = page;
 
@@ -44,20 +45,14 @@ export default async function Page({
         }
       : undefined;
 
-  // orderBy
+  // orderBy（Prisma の SortOrder 形式に合わせる）
   const orderBy =
     sort === "old"
       ? [{ publishedAt: "asc" as const }]
       : sort === "views"
-      ? [
-          { views: { sort: "desc" as const, nulls: "last" as const } },
-          { publishedAt: "desc" as const },
-        ]
+      ? [{ views: "desc" as const }, { publishedAt: "desc" as const }]
       : sort === "likes"
-      ? [
-          { likes: { sort: "desc" as const, nulls: "last" as const } },
-          { publishedAt: "desc" as const },
-        ]
+      ? [{ likes: "desc" as const }, { publishedAt: "desc" as const }]
       : [{ publishedAt: "desc" as const }];
 
   const [total, items] = await Promise.all([
@@ -108,9 +103,7 @@ export default async function Page({
           <option value="views">再生数が多い順</option>
           <option value="likes">高評価が多い順</option>
         </select>
-        <button className="rounded bg-black px-4 py-2 text-white">
-          検索
-        </button>
+        <button className="rounded bg-black px-4 py-2 text-white">検索</button>
       </form>
 
       {/* ヒット情報 */}
@@ -141,10 +134,7 @@ export default async function Page({
               <div className="mt-1 space-y-0.5 text-xs text-gray-500">
                 <div>📺 {v.channelTitle}</div>
                 <div>
-                  ⏱{" "}
-                  {v.publishedAt
-                    ? new Date(v.publishedAt).toLocaleString()
-                    : ""}
+                  ⏱ {v.publishedAt ? new Date(v.publishedAt).toLocaleString() : ""}
                 </div>
                 <div>
                   👁 {v.views?.toLocaleString?.() ?? v.views}　❤️{" "}
@@ -185,4 +175,3 @@ export default async function Page({
     </main>
   );
 }
-
