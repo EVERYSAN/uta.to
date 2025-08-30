@@ -1,120 +1,121 @@
-import { NextResponse } from "next/server";
+// src/app/api/ingest/youtube/route.ts
+import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 
-export const dynamic = "force-dynamic"; // Vercelで常にSSR/サーバ実行
+const API_KEY = process.env.YOUTUBE_API_KEY!;
+const SEARCH_URL = "https://www.googleapis.com/youtube/v3/search";
+const VIDEOS_URL = "https://www.googleapis.com/youtube/v3/videos";
 
-// YouTube 検索条件（まずは固定キーワードでMVP）
-const QUERY = "歌ってみた";
-
-// ISO8601 PT#H#M#S → 秒
-function durationToSec(iso?: string): number | null {
+// ISO8601 の PT◯H◯M◯S を秒に
+function iso8601ToSec(iso?: string | null): number | null {
   if (!iso) return null;
-  const m = iso.match(/PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?/);
+  const m = /PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?/.exec(iso);
   if (!m) return null;
-  const h = parseInt(m[1] ?? "0", 10);
-  const mi = parseInt(m[2] ?? "0", 10);
-  const s = parseInt(m[3] ?? "0", 10);
-  return h * 3600 + mi * 60 + s;
+  const h = m[1] ? parseInt(m[1], 10) : 0;
+  const mm = m[2] ? parseInt(m[2], 10) : 0;
+  const s = m[3] ? parseInt(m[3], 10) : 0;
+  return h * 3600 + mm * 60 + s;
 }
 
-async function searchYouTube({ q, publishedAfter, pageToken }: { q: string; publishedAfter?: string; pageToken?: string }) {
-  const params = new URLSearchParams({
-    key: process.env.YOUTUBE_API_KEY!,
-    part: "snippet",
-    maxResults: "25",
-    type: "video",
-    q,
-    order: "date",
-    ...(publishedAfter ? { publishedAfter } : {}),
-    ...(pageToken ? { pageToken } : {}),
-  });
-
-  const res = await fetch(`https://www.googleapis.com/youtube/v3/search?${params.toString()}`, {
-    headers: { Accept: "application/json" },
-    cache: "no-store",
-  });
-  if (!res.ok) throw new Error(`YouTube search error ${res.status}`);
-  return (await res.json()) as any;
-}
-
-async function fetchVideoDetails(ids: string[]) {
-  if (ids.length === 0) return [];
-  const params = new URLSearchParams({
-    key: process.env.YOUTUBE_API_KEY!,
-    part: "contentDetails,statistics,snippet",
-    id: ids.join(","),
-    maxResults: "50",
-  });
-  const res = await fetch(`https://www.googleapis.com/youtube/v3/videos?${params.toString()}`, {
-    headers: { Accept: "application/json" },
-    cache: "no-store",
-  });
-  if (!res.ok) throw new Error(`YouTube videos error ${res.status}`);
-  const json = await res.json();
-  return json.items ?? [];
-}
-
-export async function GET() {
-  try {
-    if (!process.env.YOUTUBE_API_KEY) {
-      return NextResponse.json({ ok: false, error: "YOUTUBE_API_KEY is missing" }, { status: 400 });
-    }
-
-    // 直近6時間の新着
-    const publishedAfter = new Date(Date.now() - 6 * 60 * 60 * 1000).toISOString();
-
-    let pageToken: string | undefined = undefined;
-    let scanned = 0;
-    let upserts = 0;
-
-    // 2ページ分だけ取得（API制限のため）
-    for (let round = 0; round < 2; round++) {
-      const searchJson = await searchYouTube({ q: QUERY, publishedAfter, pageToken });
-      const items: any[] = searchJson.items ?? [];
-      scanned += items.length;
-
-      const ids = items.map((it) => it.id?.videoId).filter(Boolean) as string[];
-      const details = await fetchVideoDetails(ids);
-
-      for (const d of details) {
-        const id = d.id as string;
-        const snippet = d.snippet ?? {};
-        const statistics = d.statistics ?? {};
-        const contentDetails = d.contentDetails ?? {};
-
-        const data = {
-          platform: "youtube" as const,
-          platformVideoId: id,
-          title: snippet.title ?? "",
-          description: snippet.description ?? "",
-          url: `https://www.youtube.com/watch?v=${id}`,
-          thumbnailUrl:
-            (snippet.thumbnails?.maxres?.url ??
-              snippet.thumbnails?.high?.url ??
-              snippet.thumbnails?.medium?.url ??
-              snippet.thumbnails?.default?.url) ?? null,
-          publishedAt: snippet.publishedAt ? new Date(snippet.publishedAt) : new Date(),
-          durationSec: durationToSec(contentDetails.duration),
-          // 追加カラム
-          channelTitle: snippet.channelTitle ?? "",
-          views: statistics.viewCount ? parseInt(statistics.viewCount, 10) : 0,
-          likes: statistics.likeCount ? parseInt(statistics.likeCount, 10) : 0,
-        };
-
-        await prisma.video.upsert({
-          where: { platform_platformVideoId: { platform: "youtube", platformVideoId: id } },
-          create: data,
-          update: data,
-        });
-        upserts++;
-      }
-
-      pageToken = searchJson.nextPageToken;
-      if (!pageToken) break;
-    }
-
-    return NextResponse.json({ ok: true, scanned, upserts });
-  } catch (e: any) {
-    return NextResponse.json({ ok: false, error: e?.message ?? String(e) }, { status: 500 });
+export async function GET(req: NextRequest) {
+  if (!API_KEY) {
+    return NextResponse.json({ error: "YOUTUBE_API_KEY is missing" }, { status: 500 });
   }
+
+  const { searchParams } = new URL(req.url);
+  const q = searchParams.get("q") ?? "歌ってみた";
+  const maxResults = Math.min(50, Math.max(1, parseInt(searchParams.get("maxResults") ?? "50", 10)));
+  const pageToken = searchParams.get("pageToken") ?? "";
+
+  // 1) 検索（動画IDとスニペット）
+  const sUrl =
+    `${SEARCH_URL}?key=${API_KEY}&part=snippet&type=video&order=date` +
+    `&maxResults=${maxResults}&q=${encodeURIComponent(q)}` +
+    (pageToken ? `&pageToken=${pageToken}` : "");
+
+  const sRes = await fetch(sUrl);
+  if (!sRes.ok) {
+    return NextResponse.json({ error: await sRes.text() }, { status: 500 });
+  }
+  const sJson: any = await sRes.json();
+  const items: any[] = sJson.items ?? [];
+  const ids = items.map((it) => it?.id?.videoId).filter(Boolean) as string[];
+
+  // 2) 統計と長さをまとめて取得（最大50件）
+  let statsMap = new Map<
+    string,
+    { views: number; likes: number; durationSec: number | null }
+  >();
+
+  if (ids.length) {
+    const vUrl = `${VIDEOS_URL}?key=${API_KEY}&part=statistics,contentDetails&id=${ids.join(",")}`;
+    const vRes = await fetch(vUrl);
+    if (!vRes.ok) {
+      return NextResponse.json({ error: await vRes.text() }, { status: 500 });
+    }
+    const vJson: any = await vRes.json();
+    for (const v of vJson.items ?? []) {
+      const id: string = v.id;
+      const st = v.statistics ?? {};
+      const cd = v.contentDetails ?? {};
+      statsMap.set(id, {
+        views: parseInt(st.viewCount ?? "0", 10) || 0,
+        likes: parseInt(st.likeCount ?? "0", 10) || 0,
+        durationSec: iso8601ToSec(cd.duration),
+      });
+    }
+  }
+
+  // 3) upsert（views / likes / channelTitle も保存）
+  for (const it of items) {
+    const vid: string | undefined = it?.id?.videoId;
+    if (!vid) continue;
+    const sn = it.snippet ?? {};
+    const stats = statsMap.get(vid) ?? { views: 0, likes: 0, durationSec: null };
+
+    const title = sn.title ?? "";
+    const url = `https://www.youtube.com/watch?v=${vid}`;
+    const thumb =
+      sn?.thumbnails?.high?.url ??
+      sn?.thumbnails?.medium?.url ??
+      sn?.thumbnails?.default?.url ??
+      null;
+    const publishedAt = sn.publishedAt ? new Date(sn.publishedAt) : new Date();
+    const channelTitle = sn.channelTitle ?? "";
+
+    await prisma.video.upsert({
+      where: {
+        platform_platformVideoId: {
+          platform: "YOUTUBE",
+          platformVideoId: vid,
+        },
+      },
+      create: {
+        platform: "YOUTUBE",
+        platformVideoId: vid,
+        title,
+        url,
+        thumbnailUrl: thumb,
+        durationSec: stats.durationSec,
+        publishedAt,
+        channelTitle,
+        views: stats.views,
+        likes: stats.likes,
+      },
+      update: {
+        title,
+        thumbnailUrl: thumb,
+        durationSec: stats.durationSec,
+        publishedAt,
+        channelTitle,
+        views: stats.views,
+        likes: stats.likes,
+      },
+    });
+  }
+
+  return NextResponse.json({
+    saved: ids.length,
+    nextPageToken: sJson.nextPageToken ?? null,
+  });
 }
