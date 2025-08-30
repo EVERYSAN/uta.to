@@ -7,6 +7,7 @@ const MAX_TOTAL = 1000;
 type SearchParams = {
   q?: string;
   sort?: "new" | "old" | "views" | "likes";
+  range?: "all" | "1d" | "7d" | "30d" | "365d"; // ★追加
   p?: string; // page
 };
 
@@ -16,9 +17,13 @@ function makeQuery(base: SearchParams, patch: Partial<SearchParams>) {
   const q = (patch.q ?? base.q ?? "").toString();
   const sort = (patch.sort ?? base.sort ?? "new").toString();
   const p = (patch.p ?? base.p ?? "1").toString();
+  const range = (patch.range ?? base.range ?? "all").toString(); // ★追加
+
   if (q) params.set("q", q);
   if (sort) params.set("sort", sort);
   if (p) params.set("p", p);
+  if (range && range !== "all") params.set("range", range); // "all"は省略でOK
+
   const qs = params.toString();
   return qs ? `/?${qs}` : "/";
 }
@@ -30,11 +35,18 @@ export default async function Page({
 }) {
   const q = (searchParams?.q ?? "").trim();
   const sort = (searchParams?.sort ?? "new") as SearchParams["sort"];
+  const range = (searchParams?.range ?? "all") as NonNullable<SearchParams["range"]>; // ★追加
   const page = Math.max(1, parseInt(searchParams?.p ?? "1", 10));
   const safePage = page;
 
-  // where
-  const where =
+  // where（キーワード）
+  let where:
+    | {
+        OR?: any[];
+        publishedAt?: { gte?: Date };
+        [k: string]: any;
+      }
+    | undefined =
     q.length > 0
       ? {
           OR: [
@@ -44,6 +56,17 @@ export default async function Page({
           ],
         }
       : undefined;
+
+  // 期間フィルタ（views/likes のときだけ有効）
+  if ((sort === "views" || sort === "likes") && range !== "all") {
+    const daysMap = { "1d": 1, "7d": 7, "30d": 30, "365d": 365 } as const;
+    const days = daysMap[range] ?? 0;
+    if (days > 0) {
+      const since = new Date();
+      since.setDate(since.getDate() - days);
+      where = { ...(where ?? {}), publishedAt: { gte: since } };
+    }
+  }
 
   // orderBy（Prisma の SortOrder 形式に合わせる）
   const orderBy =
@@ -81,7 +104,14 @@ export default async function Page({
   const limitedTotal = Math.min(total, MAX_TOTAL);
   const totalPages = Math.max(1, Math.ceil(limitedTotal / PAGE_SIZE));
 
-  const current: SearchParams = { q, sort, p: String(safePage) };
+  const current: SearchParams = {
+    q,
+    sort,
+    range, // ★追加
+    p: String(safePage),
+  };
+
+  const rangeDisabled = sort === "new" || sort === "old";
 
   return (
     <main className="mx-auto max-w-screen-xl px-4 py-6">
@@ -103,6 +133,28 @@ export default async function Page({
           <option value="views">再生数が多い順</option>
           <option value="likes">高評価が多い順</option>
         </select>
+
+        {/* ★ 期間セレクト：views/likes の時だけ有効 */}
+        <select
+          name="range"
+          defaultValue={range}
+          disabled={rangeDisabled}
+          title={
+            rangeDisabled
+              ? "新着/古い順では期間フィルタは無効です"
+              : "集計期間を選択"
+          }
+          className={`rounded border px-3 py-2 ${
+            rangeDisabled ? "opacity-50" : ""
+          }`}
+        >
+          <option value="all">全期間</option>
+          <option value="1d">今日（24時間）</option>
+          <option value="7d">直近7日</option>
+          <option value="30d">直近30日</option>
+          <option value="365d">直近1年</option>
+        </select>
+
         <button className="rounded bg-black px-4 py-2 text-white">検索</button>
       </form>
 
@@ -134,7 +186,8 @@ export default async function Page({
               <div className="mt-1 space-y-0.5 text-xs text-gray-500">
                 <div>📺 {v.channelTitle}</div>
                 <div>
-                  ⏱ {v.publishedAt ? new Date(v.publishedAt).toLocaleString() : ""}
+                  ⏱{" "}
+                  {v.publishedAt ? new Date(v.publishedAt).toLocaleString() : ""}
                 </div>
                 <div>
                   👁 {v.views?.toLocaleString?.() ?? v.views}　❤️{" "}
