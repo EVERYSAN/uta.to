@@ -8,7 +8,8 @@ export async function GET(req: Request) {
     const { searchParams } = new URL(req.url);
 
     const q = searchParams.get("q")?.trim() ?? "";
-    const sort = searchParams.get("sort") ?? "new"; // new | old | views | likes
+    type SortKey = "new" | "old" | "views" | "likes";
+    const sort = (searchParams.get("sort") as SortKey) ?? "new";
     const page = Math.max(1, parseInt(searchParams.get("page") ?? "1", 10));
     const take = Math.min(50, Math.max(1, parseInt(searchParams.get("take") ?? "50", 10)));
 
@@ -26,8 +27,7 @@ export async function GET(req: Request) {
 
     // orderBy
 
-    type SortKey = "new" | "old" | "views" | "likes";
-    const sort = (searchParams.get("sort") as SortKey) ?? "new";
+
 
     
     const orderBy =
