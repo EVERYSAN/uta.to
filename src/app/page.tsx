@@ -7,7 +7,7 @@ const MAX_TOTAL = 1000;
 type SearchParams = {
   q?: string;
   sort?: "new" | "old" | "views" | "likes";
-  range?: "all" | "1d" | "7d" | "30d" | "365d"; // ★追加
+  range?: "all" | "1d" | "7d" | "30d" | "365d"; // 期間フィルタ
   p?: string; // page
 };
 
@@ -17,12 +17,12 @@ function makeQuery(base: SearchParams, patch: Partial<SearchParams>) {
   const q = (patch.q ?? base.q ?? "").toString();
   const sort = (patch.sort ?? base.sort ?? "new").toString();
   const p = (patch.p ?? base.p ?? "1").toString();
-  const range = (patch.range ?? base.range ?? "all").toString(); // ★追加
+  const range = (patch.range ?? base.range ?? "all").toString();
 
   if (q) params.set("q", q);
   if (sort) params.set("sort", sort);
   if (p) params.set("p", p);
-  if (range && range !== "all") params.set("range", range); // "all"は省略でOK
+  if (range && range !== "all") params.set("range", range); // "all"は省略
 
   const qs = params.toString();
   return qs ? `/?${qs}` : "/";
@@ -35,7 +35,9 @@ export default async function Page({
 }) {
   const q = (searchParams?.q ?? "").trim();
   const sort = (searchParams?.sort ?? "new") as SearchParams["sort"];
-  const range = (searchParams?.range ?? "all") as NonNullable<SearchParams["range"]>; // ★追加
+  const range = (searchParams?.range ?? "all") as NonNullable<
+    SearchParams["range"]
+  >;
   const page = Math.max(1, parseInt(searchParams?.p ?? "1", 10));
   const safePage = page;
 
@@ -68,7 +70,7 @@ export default async function Page({
     }
   }
 
-  // orderBy（Prisma の SortOrder 形式に合わせる）
+  // orderBy（Prisma の SortOrder 形式）
   const orderBy =
     sort === "old"
       ? [{ publishedAt: "asc" as const }]
@@ -107,7 +109,7 @@ export default async function Page({
   const current: SearchParams = {
     q,
     sort,
-    range, // ★追加
+    range,
     p: String(safePage),
   };
 
@@ -134,7 +136,7 @@ export default async function Page({
           <option value="likes">高評価が多い順</option>
         </select>
 
-        {/* ★ 期間セレクト：views/likes の時だけ有効 */}
+        {/* 期間セレクト：views/likes の時だけ有効 */}
         <select
           name="range"
           defaultValue={range}
@@ -186,8 +188,7 @@ export default async function Page({
               <div className="mt-1 space-y-0.5 text-xs text-gray-500">
                 <div>📺 {v.channelTitle}</div>
                 <div>
-                  ⏱{" "}
-                  {v.publishedAt ? new Date(v.publishedAt).toLocaleString() : ""}
+                  ⏱ {v.publishedAt ? new Date(v.publishedAt).toLocaleString() : ""}
                 </div>
                 <div>
                   👁 {v.views?.toLocaleString?.() ?? v.views}　❤️{" "}
