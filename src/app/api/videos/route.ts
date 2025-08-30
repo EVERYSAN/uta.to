@@ -34,17 +34,12 @@ export async function GET(req: Request) {
       sort === "old"
         ? [{ publishedAt: "asc" as const }]
         : sort === "views"
-        ? [
-            { views: { sort: "desc" as const, nulls: "last" as const } },
-            { publishedAt: "desc" as const },
-          ]
+        ? [{ views: "desc" as const }, { publishedAt: "desc" as const }]
         : sort === "likes"
-        ? [
-            { likes: { sort: "desc" as const, nulls: "last" as const } },
-            { publishedAt: "desc" as const },
-          ]
+        ? [{ likes: "desc" as const }, { publishedAt: "desc" as const }]
         : [{ publishedAt: "desc" as const }];
 
+    
     const [total, items] = await Promise.all([
       prisma.video.count({ where }),
       prisma.video.findMany({
