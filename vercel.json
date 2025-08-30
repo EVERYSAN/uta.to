@@ -1,7 +1,7 @@
 {
   "crons": [
     {
-      "path": "/api/ingest/youtube?q=%E6%AD%8C%E3%81%A3%E3%81%A6%E3%81%BF%E3%81%9F&maxPages=80",
+      "path": "/api/cron/daily",
       "schedule": "0 15 * * *"
     }
   ]
