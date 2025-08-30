@@ -6,11 +6,10 @@ const prisma = new PrismaClient();
 const PAGE_MAX = 50;        // 1ページの最大件数
 const MAX_TOTAL = 1000;     // UI表示の最大件数（総数上限）
 
-// 期間文字列を日数に変換（拡張しやすいようにマップ）
+// 期間文字列 -> Date
 function periodToSinceDate(period: string | null): Date | null {
   if (!period) return null;
   const key = period.toLowerCase();
-
   const map: Record<string, number> = {
     "1d": 1,
     "day": 1,
@@ -22,12 +21,9 @@ function periodToSinceDate(period: string | null): Date | null {
     "90d": 90,
     "3m": 90,
   };
-
   const days = map[key];
   if (!days) return null;
-
-  const ms = days * 24 * 60 * 60 * 1000;
-  return new Date(Date.now() - ms);
+  return new Date(Date.now() - days * 24 * 60 * 60 * 1000);
 }
 
 export async function GET(req: NextRequest) {
@@ -35,25 +31,25 @@ export async function GET(req: NextRequest) {
 
   // クエリ
   const q = (searchParams.get("q") ?? "").trim();
-  const sortParam = (searchParams.get("sort") ?? "new").toLowerCase(); // new | old | views | likes
+  const sortParam = (searchParams.get("sort") ?? "new").toLowerCase();     // new | old | views | likes
   const periodParam = (searchParams.get("period") ?? "all").toLowerCase(); // all | 1d | 7d | 30d | 90d...
   const page = Math.max(1, parseInt(searchParams.get("page") ?? "1", 10));
   const take = Math.min(PAGE_MAX, Math.max(1, parseInt(searchParams.get("take") ?? "50", 10)));
 
-  // 検索条件(where)
+  // where
   let where: Prisma.VideoWhereInput | undefined = undefined;
 
   if (q.length > 0) {
     where = {
       OR: [
-        { title: { contains: q, mode: "insensitive" as const } },
-        { description: { contains: q, mode: "insensitive" as const } },
-        { channelTitle: { contains: q, mode: "insensitive" as const } },
+        { title: { contains: q, mode: "insensitive" } },
+        { description: { contains: q, mode: "insensitive" } },
+        { channelTitle: { contains: q, mode: "insensitive" } },
       ],
     };
   }
 
-  // 期間フィルタ：publishedAt が “since 以降”
+  // 期間フィルタ: publishedAt >= since
   const since = periodToSinceDate(periodParam === "all" ? null : periodParam);
   if (since) {
     where = {
@@ -66,13 +62,13 @@ export async function GET(req: NextRequest) {
   type SortKey = "new" | "old" | "views" | "likes";
   const sort = (["new", "old", "views", "likes"].includes(sortParam) ? sortParam : "new") as SortKey;
 
-  // Prisma の orderBy は nulls 指定ができないので、
-  // views/likes のときだけ null を除外して“0含む”でソートできるように where を拡張
+  // Prisma の型上 views/likes は Int（null 不可）になっているため not: null は不可。
+  // 並び替え時に数値が入っている行だけ対象にしたいなら gte: 0 にしておく（0 も含める）。
   if (sort === "views") {
-    where = { ...(where ?? {}), views: { not: null } };
+    where = { ...(where ?? {}), views: { gte: 0 } };
   }
   if (sort === "likes") {
-    where = { ...(where ?? {}), likes: { not: null } };
+    where = { ...(where ?? {}), likes: { gte: 0 } };
   }
 
   const orderBy: Prisma.VideoOrderByWithRelationInput[] =
@@ -85,10 +81,7 @@ export async function GET(req: NextRequest) {
       : [{ likes: "desc" }, { publishedAt: "desc" }];
 
   // 総数（UI側の上限にも合わせる）
-  const total = Math.min(
-    MAX_TOTAL,
-    await prisma.video.count({ where })
-  );
+  const total = Math.min(MAX_TOTAL, await prisma.video.count({ where }));
 
   const items = await prisma.video.findMany({
     where,
