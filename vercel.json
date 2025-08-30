@@ -1,8 +1,8 @@
 {
   "crons": [
     {
-      "path": "/api/ingest/youtube",
-      "schedule": "0 * * * *"
+      "path": "/api/ingest/youtube?q=%E6%AD%8C%E3%81%A3%E3%81%A6%E3%81%BF%E3%81%9F&maxPages=80",
+      "schedule": "0 15 * * *"
     }
   ]
 }
