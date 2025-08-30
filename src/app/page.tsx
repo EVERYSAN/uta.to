@@ -13,7 +13,7 @@ type SearchParams = {
 function makeQuery(base: SearchParams, patch: Partial<SearchParams>) {
   const params = new URLSearchParams();
   const q = (patch.q ?? base.q ?? "").toString();
-  const sort = (patch.sort ?? base.sort ?? "new").toString();
+  const sort = searchParams?.sort ?? "new";
   const p = (patch.p ?? base.p ?? "1").toString();
   if (q) params.set("q", q);
   if (sort) params.set("sort", sort);
@@ -45,10 +45,20 @@ export default async function Page({
       : undefined;
 
   // orderBy
-  let orderBy: any = { publishedAt: "desc" as const };
-  if (sort === "old") orderBy = { publishedAt: "asc" as const };
-  else if (sort === "views") orderBy = { views: "desc" as const };
-  else if (sort === "likes") orderBy = { likes: "desc" as const };
+  const orderBy =
+    sort === "old"
+      ? [{ publishedAt: "asc" as const }]
+      : sort === "views"
+      ? [
+          { views: { sort: "desc" as const, nulls: "last" as const } },
+          { publishedAt: "desc" as const },
+        ]
+      : sort === "likes"
+      ? [
+          { likes: { sort: "desc" as const, nulls: "last" as const } },
+          { publishedAt: "desc" as const },
+        ]
+      : [{ publishedAt: "desc" as const }];
 
   const [total, items] = await Promise.all([
     prisma.video.count({ where }),
@@ -175,3 +185,4 @@ export default async function Page({
     </main>
   );
 }
+
