@@ -1,13 +1,12 @@
+// src/app/api/ingest/youtube/route.ts
 import { NextRequest, NextResponse } from "next/server";
 import { PrismaClient } from "@prisma/client";
 
 const prisma = new PrismaClient();
-
 const API = "https://www.googleapis.com/youtube/v3";
 
 function parseISODuration(iso?: string | null) {
   if (!iso) return null;
-  // 超簡易: PT#M#S / PT#S / PT#M
   const m = iso.match(/PT(?:(\d+)M)?(?:(\d+)S)?/);
   if (!m) return null;
   const min = m[1] ? parseInt(m[1], 10) : 0;
@@ -26,7 +25,7 @@ export async function GET(req: NextRequest) {
   const maxResults = Math.min(50, Math.max(1, parseInt(searchParams.get("maxResults") ?? "50", 10)));
   const pageToken = searchParams.get("pageToken") ?? undefined;
 
-  // 1) search で videoId を集める
+  // 1) search で id を拾う
   const searchUrl = new URL(`${API}/search`);
   searchUrl.search = new URLSearchParams({
     key,
@@ -48,7 +47,7 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({ ok: true, scanned: 0, upserts: 0, nextPageToken: sJson.nextPageToken ?? null });
   }
 
-  // 2) videos で詳細＋統計を取得
+  // 2) videos で詳細＋統計
   const videosUrl = new URL(`${API}/videos`);
   videosUrl.search = new URLSearchParams({
     key,
@@ -80,12 +79,16 @@ export async function GET(req: NextRequest) {
 
     const durationSec = parseISODuration(contentDetails.duration);
     const channelTitle = snippet.channelTitle ?? "";
-
     const views = statistics.viewCount ? parseInt(statistics.viewCount, 10) : 0;
     const likes = statistics.likeCount ? parseInt(statistics.likeCount, 10) : 0;
 
     await prisma.video.upsert({
-      where: { platformVideoId: id },
+      where: {
+        platform_platformVideoId: {
+          platform: "youtube",
+          platformVideoId: id,
+        },
+      },
       update: {
         platform: "youtube",
         title,
@@ -112,6 +115,7 @@ export async function GET(req: NextRequest) {
         likes,
       },
     });
+
     upserts++;
   }
 
