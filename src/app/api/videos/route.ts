@@ -1,16 +1,18 @@
-import { NextRequest, NextResponse } from "next/server";
-import { PrismaClient, Prisma } from "@prisma/client";
+// src/app/api/videos/route.ts
+import { NextResponse } from "next/server";
+import { PrismaClient } from "@prisma/client";
 
 const prisma = new PrismaClient();
 
-export async function GET(req: NextRequest) {
+export async function GET(req: Request) {
   const { searchParams } = new URL(req.url);
 
-  const q = searchParams.get("q")?.trim() ?? "";
-  const sortParam = (searchParams.get("sort") ?? "new") as "new" | "old" | "views" | "likes";
+  const q = (searchParams.get("q") ?? "").trim();
+  type SortKey = "new" | "old" | "views" | "likes";
+  const sort = (searchParams.get("sort") as SortKey) ?? "new";
+
   const page = Math.max(1, parseInt(searchParams.get("page") ?? "1", 10));
   const take = Math.min(50, Math.max(1, parseInt(searchParams.get("take") ?? "50", 10)));
-  const skip = (page - 1) * take;
 
   const where =
     q.length > 0
@@ -23,30 +25,22 @@ export async function GET(req: NextRequest) {
         }
       : undefined;
 
-  let orderBy:
-    | Prisma.VideoOrderByWithRelationInput
-    | Prisma.VideoOrderByWithRelationInput[] = [{ publishedAt: "desc" }];
-
-  switch (sortParam) {
-    case "old":
-      orderBy = [{ publishedAt: "asc" }];
-      break;
-    case "views":
-      orderBy = [{ views: "desc" }, { publishedAt: "desc" }];
-      break;
-    case "likes":
-      orderBy = [{ likes: "desc" }, { publishedAt: "desc" }];
-      break;
-    default:
-      orderBy = [{ publishedAt: "desc" }];
-  }
+  const orderBy =
+    sort === "old"
+      ? [{ publishedAt: "asc" as const }]
+      : sort === "views"
+      ? // views 同値のときは新しい順に
+        [{ views: "desc" as const }, { publishedAt: "desc" as const }]
+      : sort === "likes"
+      ? [{ likes: "desc" as const }, { publishedAt: "desc" as const }]
+      : [{ publishedAt: "desc" as const }]; // new
 
   const [items, total] = await Promise.all([
     prisma.video.findMany({
       where,
       orderBy,
       take,
-      skip,
+      skip: (page - 1) * take,
       select: {
         id: true,
         platform: true,
