@@ -20,30 +20,26 @@ function parseISODuration(iso?: string | null) {
   return h * 3600 + min * 60 + sec;
 }
 
-export async function POST(req: NextRequest) {
+async function run(req: NextRequest) {
   const key = process.env.YOUTUBE_API_KEY;
-  if (!key) {
-    return NextResponse.json({ ok: false, error: "MISSING_API_KEY" }, { status: 500 });
-  }
+  if (!key) return NextResponse.json({ ok: false, error: "MISSING_API_KEY" }, { status: 500 });
 
   const { searchParams } = new URL(req.url);
-  const onlyMissing = (searchParams.get("onlyMissing") ?? "1") === "1";
+  const onlyMissing = (searchParams.get("onlyMissing") ?? "1") === "1"; // 既定は views/likes が 0 or null のものだけ
   const take = Math.min(500, Math.max(1, parseInt(searchParams.get("take") ?? "500", 10)));
 
-  // views が 0（または null）なものだけ or 全件
-  const baseWhere: any = { platform: "youtube" };
-  const where = onlyMissing ? { ...baseWhere, OR: [{ views: 0 }, { views: null }] } : baseWhere;
+  const where = onlyMissing
+    ? { platform: "youtube", OR: [{ views: 0 }, { views: null }, { likes: 0 }, { likes: null }] }
+    : { platform: "youtube" };
 
   const rows = await prisma.video.findMany({
     where,
     select: { platformVideoId: true },
-    take,
     orderBy: { publishedAt: "desc" },
+    take,
   });
 
-  if (rows.length === 0) {
-    return NextResponse.json({ ok: true, processed: 0, updated: 0 });
-  }
+  if (rows.length === 0) return NextResponse.json({ ok: true, processed: 0, updated: 0 });
 
   let updated = 0;
   const batches = chunk(rows.map(r => r.platformVideoId), 50);
@@ -61,19 +57,17 @@ export async function POST(req: NextRequest) {
 
     for (const v of json.items ?? []) {
       const id = v.id as string;
-      const snippet = v.snippet ?? {};
-      const contentDetails = v.contentDetails ?? {};
-      const statistics = v.statistics ?? {};
+      const sn = v.snippet ?? {};
+      const det = v.contentDetails ?? {};
+      const st = v.statistics ?? {};
 
-      const durationSec = parseISODuration(contentDetails.duration);
-      const channelTitle = snippet.channelTitle ?? undefined; // 未提供なら触らない
-      const views = statistics.viewCount ? parseInt(statistics.viewCount, 10) : undefined;
-      const likes = statistics.likeCount ? parseInt(statistics.likeCount, 10) : undefined;
+      const durationSec = parseISODuration(det.duration);
+      const channelTitle = sn.channelTitle ?? undefined;
+      const views = st.viewCount ? parseInt(st.viewCount, 10) : undefined;
+      const likes = st.likeCount ? parseInt(st.likeCount, 10) : undefined;
 
       await prisma.video.update({
-        where: {
-          platform_platformVideoId: { platform: "youtube", platformVideoId: id },
-        },
+        where: { platform_platformVideoId: { platform: "youtube", platformVideoId: id } },
         data: {
           ...(channelTitle !== undefined ? { channelTitle } : {}),
           ...(durationSec !== null ? { durationSec } : {}),
@@ -81,7 +75,6 @@ export async function POST(req: NextRequest) {
           ...(likes !== undefined ? { likes } : {}),
         },
       });
-
       updated++;
     }
   }
@@ -89,3 +82,5 @@ export async function POST(req: NextRequest) {
   return NextResponse.json({ ok: true, processed: rows.length, batches: batches.length, updated });
 }
 
+export async function GET(req: NextRequest)  { return run(req); }
+export async function POST(req: NextRequest) { return run(req); }
