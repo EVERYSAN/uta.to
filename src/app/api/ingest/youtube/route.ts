@@ -1,17 +1,18 @@
-// src/app/api/ingest/youtube/route.ts
 import { NextRequest, NextResponse } from "next/server";
 import { PrismaClient } from "@prisma/client";
 
 const prisma = new PrismaClient();
 const API = "https://www.googleapis.com/youtube/v3";
 
+// H:M:S まで対応
 function parseISODuration(iso?: string | null) {
   if (!iso) return null;
-  const m = iso.match(/PT(?:(\d+)M)?(?:(\d+)S)?/);
+  const m = iso.match(/PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?/);
   if (!m) return null;
-  const min = m[1] ? parseInt(m[1], 10) : 0;
-  const sec = m[2] ? parseInt(m[2], 10) : 0;
-  return min * 60 + sec;
+  const h = m[1] ? parseInt(m[1], 10) : 0;
+  const min = m[2] ? parseInt(m[2], 10) : 0;
+  const sec = m[3] ? parseInt(m[3], 10) : 0;
+  return h * 3600 + min * 60 + sec;
 }
 
 export async function GET(req: NextRequest) {
@@ -25,7 +26,7 @@ export async function GET(req: NextRequest) {
   const maxResults = Math.min(50, Math.max(1, parseInt(searchParams.get("maxResults") ?? "50", 10)));
   const pageToken = searchParams.get("pageToken") ?? undefined;
 
-  // 1) search で id を拾う
+  // 1) search で videoId を取る（軽量化のため part=id のみ）
   const searchUrl = new URL(`${API}/search`);
   searchUrl.search = new URLSearchParams({
     key,
@@ -40,14 +41,14 @@ export async function GET(req: NextRequest) {
   const sRes = await fetch(searchUrl, { cache: "no-store" });
   const sJson = await sRes.json();
   const ids: string[] = (sJson.items ?? [])
-    .map((it: any) => it.id?.videoId)
+    .map((it: any) => it?.id?.videoId)
     .filter(Boolean);
 
   if (ids.length === 0) {
     return NextResponse.json({ ok: true, scanned: 0, upserts: 0, nextPageToken: sJson.nextPageToken ?? null });
   }
 
-  // 2) videos で詳細＋統計
+  // 2) videos で snippet/contentDetails/statistics をまとめて取得
   const videosUrl = new URL(`${API}/videos`);
   videosUrl.search = new URLSearchParams({
     key,
@@ -62,6 +63,7 @@ export async function GET(req: NextRequest) {
 
   for (const v of vJson.items ?? []) {
     const id = v.id as string;
+
     const snippet = v.snippet ?? {};
     const contentDetails = v.contentDetails ?? {};
     const statistics = v.statistics ?? {};
@@ -82,6 +84,7 @@ export async function GET(req: NextRequest) {
     const views = statistics.viewCount ? parseInt(statistics.viewCount, 10) : 0;
     const likes = statistics.likeCount ? parseInt(statistics.likeCount, 10) : 0;
 
+    // 複合一意キー @@unique([platform, platformVideoId]) を使って upsert
     await prisma.video.upsert({
       where: {
         platform_platformVideoId: {
