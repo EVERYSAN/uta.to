@@ -107,8 +107,8 @@ function VideoCard({ v, range }: { v: Video; range: "1d" | "7d" | "30d" }) {
   );
 }
 
-// ===== フィルタバー（#shorts用 3 状態）=====
-type ShortsMode = "all" | "exclude" | "only";
+// ===== フィルタバー（#shorts用 2 状態）=====
+type ShortsMode = "all" | "exclude";
 
 function FilterBar({
   range,
@@ -128,7 +128,6 @@ function FilterBar({
   const shortsBtns = [
     { k: "all", label: "すべて" },
     { k: "exclude", label: "ショート除外" },
-    { k: "only", label: "#shortsのみ" },
   ] as const;
 
   return (
@@ -170,8 +169,13 @@ function TrendingPageInner() {
   const router = useRouter();
   const pathname = usePathname();
 
-  const [range, setRange] = useState<"1d" | "7d" | "30d">((search.get("range") as any) || "1d");
-  const [shorts, setShorts] = useState<ShortsMode>((search.get("shorts") as ShortsMode) || "all");
+  const initRange = (search.get("range") as "1d" | "7d" | "30d") || "1d";
+  // 古いリンクで shorts=only が来たら "all" にフォールバック
+  const rawShorts = (search.get("shorts") as ShortsMode | "only") || "all";
+  const initShorts: ShortsMode = rawShorts === "exclude" ? "exclude" : "all";
+
+  const [range, setRange] = useState<"1d" | "7d" | "30d">(initRange);
+  const [shorts, setShorts] = useState<ShortsMode>(initShorts);
 
   const [items, setItems] = useState<Video[]>([]);
   const [page, setPage] = useState(1);
@@ -249,8 +253,10 @@ function TrendingPageInner() {
   }, [page, loading, hasMore]);
 
   useEffect(() => {
+    // 初回のみ URL → 状態に同期（古い &shorts=only にも対応）
     const r = (search.get("range") as "1d" | "7d" | "30d") || "1d";
-    const s = (search.get("shorts") as ShortsMode) || "all";
+    const sRaw = (search.get("shorts") as ShortsMode | "only") || "all";
+    const s: ShortsMode = sRaw === "exclude" ? "exclude" : "all";
     setRange(r);
     setShorts(s);
     // eslint-disable-next-line react-hooks/exhaustive-deps
