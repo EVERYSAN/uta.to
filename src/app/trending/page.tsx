@@ -244,7 +244,7 @@ function TrendingPageInner() {
   return (
     <main className="mx-auto max-w-7xl px-4 py-6 space-y-4">
       <div className="flex items-center justify-between">
-        <h1 className="text-xl font-semibold text-zinc-100">急上昇</h1>
+        <h1 className="text-2xl md:text-3xl font-bold text-black dark:text-black">急上昇</h1>
       </div>
 
       <FilterBar
