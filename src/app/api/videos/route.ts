@@ -1,93 +1,90 @@
 import { NextRequest, NextResponse } from "next/server";
-import { PrismaClient, Prisma } from "@prisma/client";
+import { prisma } from "@/lib/prisma";
 
-const prisma = new PrismaClient();
+type SortKey = "new" | "old" | "views" | "likes" | "trending";
+type PeriodKey = "day" | "week" | "month";
 
-const PAGE_MAX = 50;        // 1ページの最大件数
-const MAX_TOTAL = 1000;     // UI表示の最大件数（総数上限）
-
-// 期間文字列 -> Date
-function periodToSinceDate(period: string | null): Date | null {
-  if (!period) return null;
-  const key = period.toLowerCase();
-  const map: Record<string, number> = {
-    "1d": 1,
-    "day": 1,
-    "24h": 1,
-    "7d": 7,
-    "week": 7,
-    "30d": 30,
-    "month": 30,
-    "90d": 90,
-    "3m": 90,
-  };
-  const days = map[key];
-  if (!days) return null;
-  return new Date(Date.now() - days * 24 * 60 * 60 * 1000);
-}
+const HARD_CAP = 1000; // トレンド算出は最大1000件の候補でメモリソート
 
 export async function GET(req: NextRequest) {
   const { searchParams } = new URL(req.url);
 
-  // クエリ
-  const q = (searchParams.get("q") ?? "").trim();
-  const sortParam = (searchParams.get("sort") ?? "new").toLowerCase();     // new | old | views | likes
-  const periodParam = (searchParams.get("period") ?? "all").toLowerCase(); // all | 1d | 7d | 30d | 90d...
+  const q = searchParams.get("q")?.trim() ?? "";
+  const sort = (searchParams.get("sort") ?? "new") as SortKey;
+  const period = (searchParams.get("period") ?? "day") as PeriodKey;
+
   const page = Math.max(1, parseInt(searchParams.get("page") ?? "1", 10));
-  const take = Math.min(PAGE_MAX, Math.max(1, parseInt(searchParams.get("take") ?? "50", 10)));
+  const take = Math.min(50, Math.max(1, parseInt(searchParams.get("take") ?? "50", 10)));
+  const skip = (page - 1) * take;
 
-  // where
-  let where: Prisma.VideoWhereInput | undefined = undefined;
+  const where =
+    q.length > 0
+      ? {
+          OR: [
+            { title: { contains: q, mode: "insensitive" as const } },
+            { description: { contains: q, mode: "insensitive" as const } },
+            { channelTitle: { contains: q, mode: "insensitive" as const } },
+          ],
+        }
+      : undefined;
 
-  if (q.length > 0) {
-    where = {
-      OR: [
-        { title: { contains: q, mode: "insensitive" } },
-        { description: { contains: q, mode: "insensitive" } },
-        { channelTitle: { contains: q, mode: "insensitive" } },
-      ],
-    };
+  // 既存の並び（new/old/views/likes）は Prisma の orderBy でそのまま
+  if (sort !== "trending") {
+    const orderBy =
+      sort === "old"
+        ? { publishedAt: "asc" as const }
+        : sort === "views"
+        ? { views: "desc" as const }
+        : sort === "likes"
+        ? { likes: "desc" as const }
+        : { publishedAt: "desc" as const }; // "new"
+
+    const [items, total] = await Promise.all([
+      prisma.video.findMany({
+        where,
+        orderBy,
+        take,
+        skip,
+        select: {
+          id: true,
+          platform: true,
+          platformVideoId: true,
+          title: true,
+          url: true,
+          thumbnailUrl: true,
+          durationSec: true,
+          publishedAt: true,
+          channelTitle: true,
+          views: true,
+          likes: true,
+        },
+      }),
+      prisma.video.count({ where }),
+    ]);
+
+    return NextResponse.json({
+      ok: true,
+      total,
+      page,
+      take,
+      items: items.map((v) => ({ ...v, publishedAt: v.publishedAt.toISOString() })),
+    });
   }
 
-  // 期間フィルタ: publishedAt >= since
-  const since = periodToSinceDate(periodParam === "all" ? null : periodParam);
-  if (since) {
-    where = {
-      ...(where ?? {}),
-      publishedAt: { gte: since },
-    };
-  }
+  // ===== 急上昇：スナップショットを使って“伸び”でスコアリング =====
+  const now = new Date();
+  const days = period === "week" ? 7 : period === "month" ? 30 : 1;
 
-  // 並び順
-  type SortKey = "new" | "old" | "views" | "likes";
-  const sort = (["new", "old", "views", "likes"].includes(sortParam) ? sortParam : "new") as SortKey;
+  // 期間の基準日(UTC 00:00)
+  const baselineDate = new Date(
+    Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() - days, 0, 0, 0, 0)
+  );
 
-  // Prisma の型上 views/likes は Int（null 不可）になっているため not: null は不可。
-  // 並び替え時に数値が入っている行だけ対象にしたいなら gte: 0 にしておく（0 も含める）。
-  if (sort === "views") {
-    where = { ...(where ?? {}), views: { gte: 0 } };
-  }
-  if (sort === "likes") {
-    where = { ...(where ?? {}), likes: { gte: 0 } };
-  }
-
-  const orderBy: Prisma.VideoOrderByWithRelationInput[] =
-    sort === "new"
-      ? [{ publishedAt: "desc" }]
-      : sort === "old"
-      ? [{ publishedAt: "asc" }]
-      : sort === "views"
-      ? [{ views: "desc" }, { publishedAt: "desc" }]
-      : [{ likes: "desc" }, { publishedAt: "desc" }];
-
-  // 総数（UI側の上限にも合わせる）
-  const total = Math.min(MAX_TOTAL, await prisma.video.count({ where }));
-
-  const items = await prisma.video.findMany({
+  // 候補は最大1000件（無料枠/パフォーマンス配慮）
+  const candidates = await prisma.video.findMany({
     where,
-    orderBy,
-    take,
-    skip: (page - 1) * take,
+    orderBy: { publishedAt: "desc" },
+    take: HARD_CAP,
     select: {
       id: true,
       platform: true,
@@ -103,13 +100,42 @@ export async function GET(req: NextRequest) {
     },
   });
 
-  return NextResponse.json({
-    ok: true,
-    total,
-    page,
-    take,
-    period: periodParam,
-    sort,
-    items,
+  const ids = candidates.map((v) => v.id);
+  if (ids.length === 0) {
+    return NextResponse.json({ ok: true, total: 0, page, take, items: [] });
+  }
+
+  // 基準日の記録を取得（存在しない動画は 0 扱い）
+  const prev = await prisma.videoMetric.findMany({
+    where: { videoId: { in: ids }, date: baselineDate },
+    select: { videoId: true, views: true, likes: true },
   });
+  const prevMap = new Map(prev.map((m) => [m.videoId, m]));
+
+  // スコア：Δviews + 10*Δlikes + 新しさ微加点
+  const scored = candidates.map((v) => {
+    const p = prevMap.get(v.id);
+    const dv = Math.max(0, (v.views ?? 0) - (p?.views ?? 0));
+    const dl = Math.max(0, (v.likes ?? 0) - (p?.likes ?? 0));
+    const ageHours = (now.getTime() - v.publishedAt.getTime()) / 36e5;
+    const recencyBoost = Math.exp(-ageHours / 72); // 3日で1/e
+    const score = dv + 10 * dl + 50 * recencyBoost;
+    return { v, score, dv, dl };
+  });
+
+  scored.sort((a, b) => b.score - a.score);
+
+  const total = scored.length;
+  const pageItems = scored.slice(skip, skip + take).map((s) => ({
+    ...s.v,
+    publishedAt: s.v.publishedAt.toISOString(),
+    trending: {
+      period,
+      score: Math.round(s.score),
+      deltaViews: s.dv,
+      deltaLikes: s.dl,
+    },
+  }));
+
+  return NextResponse.json({ ok: true, total, page, take, items: pageItems });
 }
