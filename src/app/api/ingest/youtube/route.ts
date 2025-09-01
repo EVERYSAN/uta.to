@@ -39,7 +39,7 @@ function isAuthorized(req: NextRequest) {
   if (h && h === process.env.CRON_SECRET) return true;
   if (req.headers.get("x-vercel-cron") === "1") return true;
   return false;
-}
+};
 
 export async function GET(req: Request) {
   const apiKey = process.env.YOUTUBE_API_KEY;
@@ -202,5 +202,6 @@ export async function GET(req: Request) {
     updated,
   });
 }
+
 
 
