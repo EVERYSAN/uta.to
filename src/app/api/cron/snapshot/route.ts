@@ -1,10 +1,19 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
+import type { NextRequest } from "next/server";
 
 function startOfUTC(d: Date) {
   return new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate(), 0, 0, 0, 0));
-}
+};
 
+function isAuthorized(req: NextRequest) {
+  const q = req.nextUrl.searchParams.get("secret");
+  const h = req.headers.get("x-cron-secret");
+  if (q && q === process.env.CRON_SECRET) return true;
+  if (h && h === process.env.CRON_SECRET) return true;
+  if (req.headers.get("x-vercel-cron") === "1") return true;
+  return false;
+};
 /**
  * 使い方:
  * /api/cron/snapshot            -> 当日(UTC) 00:00 で upsert
