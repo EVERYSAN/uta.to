@@ -1,6 +1,7 @@
+// src/app/api/videos/route.ts
 import { NextRequest, NextResponse } from "next/server";
 import { Prisma } from "@prisma/client";
-import { prisma } from "@/lib/prisma"; // 既存のパスに合わせてください
+import { prisma } from "@/lib/prisma";
 
 // 「ショート除外」は 61〜300 秒をメインに、duration 未収集(null)も許容
 const MIN_LONG_SEC = 61;
@@ -9,10 +10,7 @@ const MAX_LONG_SEC = 300;
 type ShortsMode = "all" | "exclude";
 type RangeKey = "1d" | "7d" | "30d";
 
-/**
- * 範囲フィルタ（簡易版）：publishedAt の下限を切る
- *  - データにより変える場合はここを調整
- */
+/** 期間の下限日付（簡易版） */
 function rangeToDateLowerBound(range: RangeKey): Date {
   const now = new Date();
   const d = new Date(now);
@@ -22,16 +20,17 @@ function rangeToDateLowerBound(range: RangeKey): Date {
   return d;
 }
 
-/** 並びを「決定的」にする orderBy（タイブレークまで固定） */
+/** 並びを決定的にする orderBy（タイブレークまで固定） */
 function stableOrderBy() {
+  // Prisma 5 + Postgres なら nulls 指定OK。型の都合で as any で通します
   return [
-    // ここをトレンド専用列に変更したい場合は最上位に追加
-    // 例: { trendingScore1d: { sort: "desc", nulls: "last" } } as any,
     { views: { sort: "desc", nulls: "last" } } as any,
     { likes: { sort: "desc", nulls: "last" } } as any,
     { publishedAt: { sort: "desc", nulls: "last" } } as any,
     { id: "asc" as const },
   ];
+  // もし nulls 指定で型エラーが出る環境なら下記に差し替え:
+  // return [{ views: "desc" as const }, { likes: "desc" as const }, { publishedAt: "desc" as const }, { id: "asc" as const }];
 }
 
 export async function GET(req: NextRequest) {
@@ -39,7 +38,6 @@ export async function GET(req: NextRequest) {
     const url = new URL(req.url);
     const sp = url.searchParams;
 
-    // 使うパラメータ
     const range = (sp.get("range") as RangeKey) || "1d";
     const shortsRaw = (sp.get("shorts") as ShortsMode | "only") || "all";
     const shorts: ShortsMode = shortsRaw === "exclude" ? "exclude" : "all";
@@ -50,23 +48,22 @@ export async function GET(req: NextRequest) {
 
     const q = (sp.get("q") ?? "").trim();
 
-    // ---- where の組み立て ----
+    // ---- where ----
     const where: Prisma.VideoWhereInput = { platform: "youtube" };
 
-    // 期間（下限）フィルタ：publishedAt が十分新しいもの
-    const lower = rangeToDateLowerBound(range);
-    where.publishedAt = { gte: lower };
+    // 期間（下限）
+    where.publishedAt = { gte: rangeToDateLowerBound(range) };
 
-    // テキスト検索（タイトル / 説明 / チャンネル名 など任意の列に合わせて調整可）
+    // キーワード
     if (q.length > 0) {
       where.OR = [
         { title: { contains: q, mode: "insensitive" } },
         { channelTitle: { contains: q, mode: "insensitive" } },
-        // { description: { contains: q, mode: "insensitive" } }, // 説明を持っているなら
+        // { description: { contains: q, mode: "insensitive" } }, // 説明カラムがあるなら
       ];
     }
 
-    // ショート除外：61〜300 秒 or 収集前(null) を許容
+    // ショート除外: 61〜300秒 or 未収集(null) を許容
     if (shorts === "exclude") {
       where.AND = [
         ...(Array.isArray(where.AND) ? (where.AND as Prisma.VideoWhereInput[]) : []),
@@ -98,9 +95,6 @@ export async function GET(req: NextRequest) {
           channelTitle: true,
           views: true,
           likes: true,
-          // trendingRank / trendingScore を保持しているなら true に
-          trendingRank: false as any,
-          trendingScore: false as any,
         },
       }),
       prisma.video.count({ where }),
