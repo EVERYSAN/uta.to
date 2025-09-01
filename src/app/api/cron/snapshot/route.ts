@@ -1,4 +1,4 @@
-import { NextRequest, NextResponse } from "next/server";
+
 import { prisma } from "@/lib/prisma";
 import type { NextRequest } from "next/server";
 import { NextResponse } from "next/server"; // 使っている場合のみ
