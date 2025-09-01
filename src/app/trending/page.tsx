@@ -1,210 +1,318 @@
-import Link from "next/link";
-import { prisma } from "@/lib/prisma";
+// src/app/trending/page.tsx
+"use client";
 
-const PAGE_SIZE = 50;
-const MAX_TOTAL = 1000; // ランキング対象を最多1000件に制限（無料枠の負荷対策）
+import { useEffect, useMemo, useRef, useState } from "react";
+import { usePathname, useRouter, useSearchParams } from "next/navigation";
 
-type SearchParams = {
-  q?: string;
-  range?: "all" | "1d" | "7d" | "30d" | "365d";
-  p?: string;
+// ===== ユーティリティ =====
+const nf = new Intl.NumberFormat("ja-JP");
+const fmtCount = (n?: number | null) => (typeof n === "number" ? nf.format(n) : "0");
+const fmtDate = (iso?: string) => {
+  if (!iso) return "";
+  const d = new Date(iso);
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  const hh = String(d.getHours()).padStart(2, "0");
+  const mm = String(d.getMinutes()).padStart(2, "0");
+  return `${y}/${m}/${day} ${hh}:${mm}`;
+};
+const secsToLabel = (s?: number | null) => {
+  if (!s && s !== 0) return "";
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  const sec = Math.floor(s % 60);
+  return h > 0 ? `${h}:${String(m).padStart(2, "0")}:${String(sec).padStart(2, "0")}` : `${m}:${String(sec).padStart(2, "0")}`;
 };
 
-// クエリ生成
-function makeQuery(base: SearchParams, patch: Partial<SearchParams>) {
-  const params = new URLSearchParams();
-  const q = (patch.q ?? base.q ?? "").toString();
-  const range = (patch.range ?? base.range ?? "7d").toString(); // デフォルト7日
-  const p = (patch.p ?? base.p ?? "1").toString();
+// ===== 型（APIの想定。無い項目はoptionalに） =====
+type Video = {
+  id: string;
+  platform: "youtube";
+  platformVideoId: string;
+  title: string;
+  url: string;
+  thumbnailUrl?: string;
+  durationSec?: number | null;
+  publishedAt?: string; // ISO
+  channelTitle?: string;
+  views?: number | null;
+  likes?: number | null;
 
-  if (q) params.set("q", q);
-  if (range && range !== "all") params.set("range", range);
-  if (p) params.set("p", p);
+  // 急上昇用に返ってくるかもしれないメタ
+  trendingRank?: number | null;
+  trendingScore?: number | null;
+  // 24h/7d/30dでの増加分など（存在すればバッジ横に表示可能）
+  deltaViews?: number | null;
+  deltaLikes?: number | null;
+};
 
-  const qs = params.toString();
-  return qs ? `/trending?${qs}` : "/trending";
+type ApiList = {
+  ok: boolean;
+  items: Video[];
+  page?: number;
+  take?: number;
+  total?: number;
+};
+
+// ===== バッジ（ツールチップ付き）=====
+function TrendingBadge({ rank, range }: { rank?: number | null; range: "1d" | "7d" | "30d" }) {
+  const label = rank ? `#${rank}` : "急上昇";
+  const rangeText = range === "1d" ? "24時間" : range === "7d" ? "7日間" : "30日間";
+  return (
+    <div className="inline-flex items-center gap-1 rounded-full bg-violet-600/20 text-violet-300 px-2 py-0.5 text-[11px]">
+      <span>⬆</span>
+      <span className="font-medium">{label}</span>
+      <span className="opacity-70">/ {rangeText}</span>
+      <span className="ml-1 cursor-help group relative select-none">ⓘ
+        <span className="pointer-events-none hidden group-hover:block absolute left-1/2 -translate-x-1/2 top-6 w-72 rounded-md bg-zinc-900 p-3 text-xs text-zinc-200 shadow-xl z-10">
+          急上昇スコアは直近期間の「再生増加」「高評価増加」「公開からの新しさ」を総合評価しています（例：24h=昨日比）。表示は独自集計で、YouTube公式の急上昇とは異なります。
+        </span>
+      </span>
+    </div>
+  );
 }
 
-// 時間減衰つきスコア
-function trendingScore(
-  views: number | null | undefined,
-  likes: number | null | undefined,
-  publishedAt: Date
-) {
-  const v = Math.max(0, views ?? 0);
-  const l = Math.max(0, likes ?? 0);
-  const hours = Math.max(1, (Date.now() - publishedAt.getTime()) / 36e5);
-  // 例: 高評価を重めにしつつ、時間経過で減衰
-  return (v + l * 20) / Math.pow(hours + 2, 1.3);
+// ===== 動画カード =====
+function VideoCard({ v, range }: { v: Video; range: "1d" | "7d" | "30d" }) {
+  return (
+    <a href={v.url} target="_blank" rel="noopener noreferrer"
+       className="group block rounded-2xl overflow-hidden bg-zinc-900 hover:bg-zinc-800 transition-colors">
+      <div className="relative aspect-video bg-zinc-800">
+        {/* サムネ */}
+        {v.thumbnailUrl ? (
+          // eslint-disable-next-line @next/next/no-img-element
+          <img
+            src={v.thumbnailUrl}
+            alt={v.title}
+            loading="lazy"
+            className="absolute inset-0 h-full w-full object-cover"
+          />
+        ) : null}
+        {/* 長さ */}
+        {typeof v.durationSec === "number" && (
+          <span className="absolute bottom-2 right-2 rounded bg-black/70 text-white text-[11px] px-1.5 py-0.5">
+            {secsToLabel(v.durationSec)}
+          </span>
+        )}
+      </div>
+
+      <div className="p-3 space-y-2">
+        <div className="flex items-center justify-between gap-2">
+          <TrendingBadge rank={v.trendingRank ?? null} range={range} />
+          <div className="text-[11px] text-zinc-400">{fmtDate(v.publishedAt)}</div>
+        </div>
+
+        <h3 className="text-sm font-semibold leading-snug line-clamp-2 text-zinc-100">
+          {v.title}
+        </h3>
+
+        <div className="flex items-center gap-3 text-[12px] text-zinc-400">
+          <span className="inline-flex items-center gap-1">👁 {fmtCount(v.views)}</span>
+          <span className="inline-flex items-center gap-1">❤️ {fmtCount(v.likes)}</span>
+          {v.channelTitle && (
+            <span className="ml-auto truncate max-w-[50%] text-zinc-300">🎤 {v.channelTitle}</span>
+          )}
+        </div>
+      </div>
+    </a>
+  );
 }
 
-export default async function Page({
-  searchParams,
+// ===== フィルタバー（61–300秒トグル＋並び確認）=====
+function FilterBar({
+  range, minSec, maxSec, onChange
 }: {
-  searchParams?: SearchParams;
+  range: "1d" | "7d" | "30d";
+  minSec: number; maxSec: number;
+  onChange: (next: Partial<{ range: "1d" | "7d" | "30d"; minSec: number; maxSec: number; }>) => void;
 }) {
-  const q = (searchParams?.q ?? "").trim();
-  const range = (searchParams?.range ?? "7d") as NonNullable<SearchParams["range"]>;
-  const page = Math.max(1, parseInt(searchParams?.p ?? "1", 10));
-  const safePage = page;
+  const isLenFilter = minSec === 61 && maxSec === 300;
+  return (
+    <div className="flex flex-wrap items-center gap-2">
+      {/* タブ */}
+      {[
+        { k: "1d", label: "24h" },
+        { k: "7d", label: "7日" },
+        { k: "30d", label: "30日" },
+      ].map(({ k, label }) => (
+        <button
+          key={k}
+          onClick={() => onChange({ range: k as any })}
+          className={`px-3 py-1.5 rounded-full text-sm ${
+            range === k ? "bg-violet-600 text-white" : "bg-zinc-800 text-zinc-200 hover:bg-zinc-700"
+          }`}
+        >
+          {label}
+        </button>
+      ))}
 
-  // where（キーワード）
-  let where:
-    | {
-        OR?: any[];
-        publishedAt?: { gte?: Date };
-        [k: string]: any;
-      }
-    | undefined =
-    q.length > 0
-      ? {
-          OR: [
-            { title: { contains: q, mode: "insensitive" as const } },
-            { description: { contains: q, mode: "insensitive" as const } },
-            { channelTitle: { contains: q, mode: "insensitive" as const } },
-          ],
-        }
-      : undefined;
+      {/* 長さフィルタ */}
+      <label className="ml-2 inline-flex items-center gap-2 text-sm bg-zinc-800 hover:bg-zinc-700 rounded-full px-3 py-1.5 cursor-pointer">
+        <input
+          type="checkbox"
+          checked={isLenFilter}
+          onChange={(e) => onChange(e.target.checked ? { minSec: 61, maxSec: 300 } : { minSec: 0, maxSec: 60 * 60 })}
+        />
+        <span>長さ 61秒〜5分</span>
+      </label>
 
-  // 期間フィルタ（ランキング対象の期間）
-  if (range !== "all") {
-    const daysMap = { "1d": 1, "7d": 7, "30d": 30, "365d": 365 } as const;
-    const days = daysMap[range] ?? 0;
-    if (days > 0) {
-      const since = new Date();
-      since.setDate(since.getDate() - days);
-      where = { ...(where ?? {}), publishedAt: { gte: since } };
+      <span className="text-xs text-zinc-500 ml-auto">並び: 急上昇</span>
+    </div>
+  );
+}
+
+// ===== メインページ =====
+export default function TrendingPage() {
+  const search = useSearchParams();
+  const router = useRouter();
+  const pathname = usePathname();
+
+  // URLクエリ → 状態（既定：range=1d, 61〜300s）
+  const [range, setRange] = useState<"1d" | "7d" | "30d">(
+    (search.get("range") as any) || "1d"
+  );
+  const [minSec, setMinSec] = useState<number>(parseInt(search.get("minSec") || "61", 10));
+  const [maxSec, setMaxSec] = useState<number>(parseInt(search.get("maxSec") || "300", 10));
+
+  // 一覧データ（無限スクロール）
+  const [items, setItems] = useState<Video[]>([]);
+  const [page, setPage] = useState(1);
+  const [hasMore, setHasMore] = useState(true);
+  const [loading, setLoading] = useState(false);
+  const sentinelRef = useRef<HTMLDivElement | null>(null);
+
+  // クエリをURLに同期
+  const syncQuery = (next?: Partial<{ range: "1d" | "7d" | "30d"; minSec: number; maxSec: number }>) => {
+    const r = next?.range ?? range;
+    const mi = next?.minSec ?? minSec;
+    const ma = next?.maxSec ?? maxSec;
+    const qs = new URLSearchParams(search.toString());
+    qs.set("sort", "trending");
+    qs.set("range", r);
+    qs.set("minSec", String(mi));
+    qs.set("maxSec", String(ma));
+    router.replace(`${pathname}?${qs.toString()}`, { scroll: false });
+  };
+
+  // 初回＆クエリ変更時にリセットして再取得
+  useEffect(() => {
+    setItems([]);
+    setPage(1);
+    setHasMore(true);
+    fetchPage(1, true);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [range, minSec, maxSec]);
+
+  // データ取得
+  const queryString = useMemo(() => {
+    const qs = new URLSearchParams();
+    qs.set("sort", "trending");
+    qs.set("range", range);
+    qs.set("minSec", String(minSec));
+    qs.set("maxSec", String(maxSec));
+    qs.set("page", String(page));
+    qs.set("take", "24");
+    return qs.toString();
+  }, [range, minSec, maxSec, page]);
+
+  async function fetchPage(p: number, replace = false) {
+    if (loading || !hasMore) return;
+    setLoading(true);
+    try {
+      const qs = new URLSearchParams();
+      qs.set("sort", "trending");
+      qs.set("range", range);
+      qs.set("minSec", String(minSec));
+      qs.set("maxSec", String(maxSec));
+      qs.set("page", String(p));
+      qs.set("take", "24");
+      const res = await fetch(`/api/videos?${qs.toString()}`, { cache: "no-store" });
+      const json: ApiList = await res.json();
+      const rows = json?.items ?? [];
+      setItems((prev) => (replace ? rows : [...prev, ...rows]));
+      if (rows.length < 24) setHasMore(false);
+    } catch (e) {
+      // 失敗してもアプリは落とさない
+      setHasMore(false);
+    } finally {
+      setLoading(false);
     }
   }
 
-  // 対象件数（上限1000）
-  const total = await prisma.video.count({ where });
-  const limitedTotal = Math.min(total, MAX_TOTAL);
+  // 交差オブザーバでページング
+  useEffect(() => {
+    if (!sentinelRef.current) return;
+    const el = sentinelRef.current;
+    const ob = new IntersectionObserver((ents) => {
+      ents.forEach((ent) => {
+        if (ent.isIntersecting && !loading && hasMore) {
+          const next = page + 1;
+          setPage(next);
+          fetchPage(next);
+        }
+      });
+    }, { rootMargin: "600px 0px" });
+    ob.observe(el);
+    return () => ob.disconnect();
+  }, [page, loading, hasMore]);
 
-  // 計算のためまとめて取得（最新順で最大1000件）
-  const pool = await prisma.video.findMany({
-    where,
-    orderBy: [{ publishedAt: "desc" as const }],
-    take: limitedTotal,
-    select: {
-      id: true,
-      platform: true,
-      platformVideoId: true,
-      title: true,
-      url: true,
-      thumbnailUrl: true,
-      durationSec: true,
-      publishedAt: true,
-      channelTitle: true,
-      views: true,
-      likes: true,
-    },
-  });
-
-  // スコア計算 → 降順ソート
-  const ranked = pool
-    .map((v) => ({
-      ...v,
-      _score: trendingScore(v.views, v.likes, new Date(v.publishedAt)),
-    }))
-    .sort((a, b) => b._score - a._score);
-
-  // ページング
-  const totalPages = Math.max(1, Math.ceil(limitedTotal / PAGE_SIZE));
-  const start = (safePage - 1) * PAGE_SIZE;
-  const end = start + PAGE_SIZE;
-  const items = ranked.slice(start, end);
-
-  const current: SearchParams = {
-    q,
-    range,
-    p: String(safePage),
-  };
+  // URLから入ってきた初回クエリを状態に反映
+  useEffect(() => {
+    const r = (search.get("range") as "1d" | "7d" | "30d") || "1d";
+    const mi = parseInt(search.get("minSec") || "61", 10);
+    const ma = parseInt(search.get("maxSec") || "300", 10);
+    setRange(r);
+    setMinSec(isNaN(mi) ? 61 : mi);
+    setMaxSec(isNaN(ma) ? 300 : ma);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []); // 初回のみ
 
   return (
-    <main className="mx-auto max-w-screen-xl px-4 py-6">
-      <h1 className="mb-4 text-xl font-semibold">🔥 急上昇</h1>
-
-      {/* フィルタ */}
-      <form className="mb-6 flex flex-col gap-3 sm:flex-row sm:items-center">
-        <input
-          name="q"
-          defaultValue={q}
-          placeholder="キーワード（タイトル・説明・チャンネル名）"
-          className="w-full rounded border px-3 py-2"
-        />
-        <select name="range" defaultValue={range} className="rounded border px-3 py-2">
-          <option value="1d">今日（24時間）</option>
-          <option value="7d">直近7日</option>
-          <option value="30d">直近30日</option>
-          <option value="365d">直近1年</option>
-          <option value="all">全期間</option>
-        </select>
-        <button className="rounded bg-black px-4 py-2 text-white">更新</button>
-      </form>
-
-      {/* ヒット情報 */}
-      <div className="mb-4 text-sm text-gray-600">
-        対象 {limitedTotal.toLocaleString()} 件（{safePage}/{totalPages}）
+    <main className="mx-auto max-w-7xl px-4 py-6 space-y-4">
+      {/* 見出し＆フィルタ */}
+      <div className="flex items-center justify-between">
+        <h1 className="text-xl font-semibold text-zinc-100">急上昇</h1>
       </div>
 
-      {/* 4カラムグリッド（トップと同じ見た目） */}
-      <div className="grid grid-cols-1 gap-6 sm:grid-cols-2 lg:grid-cols-4">
+      <FilterBar
+        range={range}
+        minSec={minSec}
+        maxSec={maxSec}
+        onChange={(next) => {
+          if (next.range) setRange(next.range);
+          if (typeof next.minSec === "number") setMinSec(next.minSec);
+          if (typeof next.maxSec === "number") setMaxSec(next.maxSec);
+          syncQuery(next);
+        }}
+      />
+
+      {/* グリッド */}
+      <section
+        className="
+          grid gap-4
+          grid-cols-1
+          sm:grid-cols-2
+          xl:grid-cols-3
+          2xl:grid-cols-4
+        "
+      >
         {items.map((v) => (
-          <a
-            key={v.id}
-            href={v.url}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="block overflow-hidden rounded border shadow-sm hover:shadow-md"
-          >
-            <div className="relative aspect-video">
-              <img
-                src={v.thumbnailUrl ?? "/placeholder.png"}
-                alt={v.title}
-                className="absolute inset-0 h-full w-full object-cover"
-                loading="lazy"
-              />
-            </div>
-            <div className="p-2">
-              <h3 className="line-clamp-2 text-sm font-medium">{v.title}</h3>
-              <div className="mt-1 space-y-0.5 text-xs text-gray-500">
-                <div>📺 {v.channelTitle}</div>
-                <div>⏱ {v.publishedAt ? new Date(v.publishedAt).toLocaleString() : ""}</div>
-                <div>
-                  👁 {v.views?.toLocaleString?.() ?? v.views}　❤️{" "}
-                  {v.likes?.toLocaleString?.() ?? v.likes}
-                </div>
-              </div>
-            </div>
-          </a>
+          <VideoCard key={v.id} v={v} range={range} />
         ))}
-      </div>
+      </section>
 
-      {/* ページネーション */}
-      <div className="mt-6 flex items-center justify-between">
-        <Link
-          href={makeQuery(current, { p: String(Math.max(1, safePage - 1)) })}
-          className={`rounded border px-3 py-2 ${
-            safePage <= 1 ? "pointer-events-none opacity-40" : ""
-          }`}
-        >
-          ← 前の50件
-        </Link>
-
-        <div className="text-sm">
-          表示 {items.length} / {limitedTotal} 件（{safePage}/{totalPages}）
-        </div>
-
-        <Link
-          href={makeQuery(current, { p: String(Math.min(totalPages, safePage + 1)) })}
-          className={`rounded border px-3 py-2 ${
-            safePage >= totalPages ? "pointer-events-none opacity-40" : ""
-          }`}
-        >
-          次の50件 →
-        </Link>
-      </div>
+      {/* ロード中・終端 */}
+      <div ref={sentinelRef} />
+      {loading && (
+        <div className="text-center text-sm text-zinc-400 py-4">読み込み中…</div>
+      )}
+      {!hasMore && !loading && items.length > 0 && (
+        <div className="text-center text-sm text-zinc-500 py-6">以上です</div>
+      )}
+      {!loading && items.length === 0 && (
+        <div className="text-center text-sm text-zinc-500 py-10">該当する動画がありません</div>
+      )}
     </main>
   );
 }
