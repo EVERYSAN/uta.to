@@ -58,8 +58,6 @@ function TrendingBadge({ rank, range }: { rank?: number | null; range: "1d" | "7
       <span>⬆</span><span className="font-medium">{label}</span>
       <span className="opacity-70">/ {rangeText}</span>
       <span className="ml-1 cursor-help group relative select-none">
-        <span className="pointer-events-none hidden group-hover:block absolute left-1/2 -translate-x-1/2 top-6 w-72 rounded-md bg-zinc-900 p-3 text-xs text-zinc-200 shadow-xl z-10">
-        </span>
       </span>
     </div>
   );
@@ -138,7 +136,7 @@ function FilterBar({
         <span>長さ 61秒〜5分</span>
       </label>
 
-      <span className="text-xs text-zinc-100 ml-auto">並び: 急上昇</span>
+      <span className="text-xs text-zinc-500 ml-auto">並び: 急上昇</span>
     </div>
   );
 }
