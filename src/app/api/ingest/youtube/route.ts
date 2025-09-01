@@ -32,6 +32,14 @@ function iso8601DurationToSec(iso?: string | null): number | null {
   const s = parseInt(m[3] ?? "0", 10);
   return h * 3600 + mi * 60 + s;
 }
+function isAuthorized(req: NextRequest) {
+  const q = req.nextUrl.searchParams.get("secret");
+  const h = req.headers.get("x-cron-secret");
+  if (q && q === process.env.CRON_SECRET) return true;
+  if (h && h === process.env.CRON_SECRET) return true;
+  if (req.headers.get("x-vercel-cron") === "1") return true;
+  return false;
+}
 
 export async function GET(req: Request) {
   const apiKey = process.env.YOUTUBE_API_KEY;
@@ -194,3 +202,4 @@ export async function GET(req: Request) {
     updated,
   });
 }
+
