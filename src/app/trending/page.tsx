@@ -3,7 +3,7 @@
 import { Suspense, useEffect, useMemo, useRef, useState } from "react";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 
-// 動的レンダー（プリレンダーの絡みを回避）
+// 動的レンダー（SSR のプリレンダー絡みを回避）
 export const dynamic = "force-dynamic";
 
 // ===== ユーティリティ =====
@@ -44,8 +44,6 @@ type Video = {
   likes?: number | null;
   trendingRank?: number | null;
   trendingScore?: number | null;
-  deltaViews?: number | null;
-  deltaLikes?: number | null;
 };
 type ApiList = { ok: boolean; items: Video[]; page?: number; take?: number; total?: number };
 
@@ -137,7 +135,7 @@ function FilterBar({
           key={k}
           onClick={() => onChange({ range: k as any })}
           className={`px-3 py-1.5 rounded-full text-sm ${
-            range === k ? "bg-violet-600 text-white" : "bg-zinc-800 text-zinc-200 hover:bg-zinc-700"
+            range === k ? "bg-violet-600 text-white" : "bg-zinc-800 text-white hover:bg-zinc-700"
           }`}
         >
           {label}
@@ -150,7 +148,7 @@ function FilterBar({
             key={k}
             onClick={() => onChange({ shorts: k as ShortsMode })}
             className={`px-3 py-1.5 rounded-full text-sm ${
-              shorts === k ? "bg-violet-600 text-white" : "text-zinc-200 hover:bg-zinc-700"
+              shorts === k ? "bg-violet-600 text-white" : "text-white hover:bg-zinc-700"
             }`}
           >
             {label}
@@ -163,14 +161,13 @@ function FilterBar({
   );
 }
 
-// ===== 中身（useSearchParams を使う）=====
+// ===== 中身 =====
 function TrendingPageInner() {
   const search = useSearchParams();
   const router = useRouter();
   const pathname = usePathname();
 
   const initRange = (search.get("range") as "1d" | "7d" | "30d") || "1d";
-  // 古いリンクで shorts=only が来たら "all" にフォールバック
   const rawShorts = (search.get("shorts") as ShortsMode | "only") || "all";
   const initShorts: ShortsMode = rawShorts === "exclude" ? "exclude" : "all";
 
@@ -183,6 +180,7 @@ function TrendingPageInner() {
   const [loading, setLoading] = useState(false);
   const sentinelRef = useRef<HTMLDivElement | null>(null);
 
+  // 条件 → URL 同期
   const syncQuery = (next?: Partial<{ range: "1d" | "7d" | "30d"; shorts: ShortsMode }>) => {
     const r = next?.range ?? range;
     const s = next?.shorts ?? shorts;
@@ -193,6 +191,7 @@ function TrendingPageInner() {
     router.replace(`${pathname}?${qs.toString()}`, { scroll: false });
   };
 
+  // 条件が変わったら完全リセットして 1 ページ目から取得
   useEffect(() => {
     setItems([]);
     setPage(1);
@@ -201,18 +200,8 @@ function TrendingPageInner() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [range, shorts]);
 
-  const queryString = useMemo(() => {
-    const qs = new URLSearchParams();
-    qs.set("sort", "trending");
-    qs.set("range", range);
-    qs.set("shorts", shorts);
-    qs.set("page", String(page));
-    qs.set("take", "24");
-    return qs.toString();
-  }, [range, shorts, page]);
-
   async function fetchPage(p: number, replace = false) {
-    if (loading || !hasMore) return;
+    if (loading || (!replace && !hasMore)) return;
     setLoading(true);
     try {
       const qs = new URLSearchParams();
@@ -221,6 +210,7 @@ function TrendingPageInner() {
       qs.set("shorts", shorts);
       qs.set("page", String(p));
       qs.set("take", "24");
+
       const res = await fetch(`/api/videos?${qs.toString()}`, { cache: "no-store" });
       const json: ApiList = await res.json();
       const rows = json?.items ?? [];
@@ -233,6 +223,7 @@ function TrendingPageInner() {
     }
   }
 
+  // 無限スクロール
   useEffect(() => {
     if (!sentinelRef.current) return;
     const el = sentinelRef.current;
@@ -252,8 +243,8 @@ function TrendingPageInner() {
     return () => ob.disconnect();
   }, [page, loading, hasMore]);
 
+  // 初期 URL → 状態同期（古い &shorts=only も all に寄せる）
   useEffect(() => {
-    // 初回のみ URL → 状態に同期（古い &shorts=only にも対応）
     const r = (search.get("range") as "1d" | "7d" | "30d") || "1d";
     const sRaw = (search.get("shorts") as ShortsMode | "only") || "all";
     const s: ShortsMode = sRaw === "exclude" ? "exclude" : "all";
@@ -262,11 +253,14 @@ function TrendingPageInner() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []); // 初回のみ
 
+  // 条件が変わった時にセクションを丸ごと再マウントさせるためのキー
+  const listKey = `${range}-${shorts}`;
+
   return (
     <main className="mx-auto max-w-7xl px-4 py-6 space-y-4">
       <div className="flex items-center justify-between">
-        {/* ① 黒文字でコントラスト確保 */}
-        <h1 className="text-2xl md:text-3xl font-bold text-black dark:text-black">急上昇</h1>
+        {/* ① 黒文字（ダークでも黒に固定してコントラスト確保） */}
+        <h1 className="text-2xl md:text-3xl font-bold text-black">急上昇</h1>
       </div>
 
       <FilterBar
@@ -279,7 +273,10 @@ function TrendingPageInner() {
         }}
       />
 
-      <section className="grid gap-4 grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4">
+      <section
+        key={listKey}
+        className="grid gap-4 grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4"
+      >
         {items.map((v) => (
           <VideoCard key={v.id} v={v} range={range} />
         ))}
