@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
+import type { Prisma } from "@prisma/client";
 
 type SortKey = "new" | "old" | "views" | "likes" | "trending";
 type PeriodKey = "day" | "week" | "month";
@@ -7,21 +8,19 @@ type PeriodKey = "day" | "week" | "month";
 const HARD_CAP = 1000; // トレンド算出は最大1000件の候補でメモリソート
 
 export async function GET(req: NextRequest) {
-  const { searchParams } = new URL(req.url);
   const sp = req.nextUrl.searchParams;
   const sort = sp.get("sort") ?? "trending";
   const range = sp.get("range") ?? "1d";
 
-  const q = searchParams.get("q")?.trim() ?? "";
-  const sort = (searchParams.get("sort") ?? "new") as SortKey;
-  const period = (searchParams.get("period") ?? "day") as PeriodKey;
+  type SortKey = "trending" | "new" | "old" | "views" | "likes";
+  const q    = sp.get("q")?.trim() ?? "";
+  const sort = (sp.get("sort") as SortKey) || "trending";
+  const range = sp.get("range") || "1d";   // 使っているなら
 
     // 追加: 長さフィルタ（既定 61〜300 秒）
   const minSec = Math.max(0, parseInt(sp.get("minSec") ?? "61", 10) || 61);
   const maxSec = Math.max(minSec, parseInt(sp.get("maxSec") ?? "300", 10) || 300);
 
-  // 既存の where にマージする形で OK
-  let where: any = { platform: "youtube" };
 
   // 追加: 61〜300秒のものだけに絞る（null は自然に除外されます）
   where.durationSec = { gte: minSec, lte: maxSec };
@@ -31,17 +30,19 @@ export async function GET(req: NextRequest) {
   const take = Math.min(50, Math.max(1, parseInt(searchParams.get("take") ?? "50", 10)));
   const skip = (page - 1) * take;
 
-  const where =
+  const where: Prisma.VideoWhereInput = {
+  platform: "youtube",
     q.length > 0
       ? {
           OR: [
-            { title: { contains: q, mode: "insensitive" as const } },
-            { description: { contains: q, mode: "insensitive" as const } },
-            { channelTitle: { contains: q, mode: "insensitive" as const } },
-          ],
-        }
-      : undefined;
-
+          { title:        { contains: q, mode: "insensitive" } },
+          { description:  { contains: q, mode: "insensitive" } },
+          { channelTitle: { contains: q, mode: "insensitive" } },
+        ],
+      }
+    : {}),
+  // 61〜300秒だけ（デフォルト）に絞り込む
+  durationSec: { gte: minSec, lte: maxSec },
   // 既存の並び（new/old/views/likes）は Prisma の orderBy でそのまま
   if (sort !== "trending") {
     const orderBy =
