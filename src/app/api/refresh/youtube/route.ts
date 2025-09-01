@@ -2,11 +2,20 @@
 import { NextResponse } from "next/server";
 import { PrismaClient } from "@prisma/client";
 import { fetchDetails } from "@/lib/youtube";
+import type { NextRequest } from "next/server";
 
 const prisma = new PrismaClient();
 
 // 例:
 // /api/refresh/youtube?onlyMissing=1&take=500
+function isAuthorized(req: NextRequest) {
+  const q = req.nextUrl.searchParams.get("secret");
+  const h = req.headers.get("x-cron-secret");
+  if (q && q === process.env.CRON_SECRET) return true;
+  if (h && h === process.env.CRON_SECRET) return true;
+  if (req.headers.get("x-vercel-cron") === "1") return true;
+  return false;
+};
 // /api/refresh/youtube?sinceHours=48&take=1000
 export async function GET(req: Request) {
   const { searchParams } = new URL(req.url);
