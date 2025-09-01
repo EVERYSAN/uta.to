@@ -8,11 +8,25 @@ const HARD_CAP = 1000; // トレンド算出は最大1000件の候補でメモ�
 
 export async function GET(req: NextRequest) {
   const { searchParams } = new URL(req.url);
+  const sp = req.nextUrl.searchParams;
+  const sort = sp.get("sort") ?? "trending";
+  const range = sp.get("range") ?? "1d";
 
   const q = searchParams.get("q")?.trim() ?? "";
   const sort = (searchParams.get("sort") ?? "new") as SortKey;
   const period = (searchParams.get("period") ?? "day") as PeriodKey;
 
+    // 追加: 長さフィルタ（既定 61〜300 秒）
+  const minSec = Math.max(0, parseInt(sp.get("minSec") ?? "61", 10) || 61);
+  const maxSec = Math.max(minSec, parseInt(sp.get("maxSec") ?? "300", 10) || 300);
+
+  // 既存の where にマージする形で OK
+  let where: any = { platform: "youtube" };
+
+  // 追加: 61〜300秒のものだけに絞る（null は自然に除外されます）
+  where.durationSec = { gte: minSec, lte: maxSec };
+
+  
   const page = Math.max(1, parseInt(searchParams.get("page") ?? "1", 10));
   const take = Math.min(50, Math.max(1, parseInt(searchParams.get("take") ?? "50", 10)));
   const skip = (page - 1) * take;
