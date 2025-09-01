@@ -5,8 +5,14 @@
   "scripts": {
     "dev": "next dev",
     "build": "prisma generate && prisma db push && next build",
+    "vercel-build": "prisma generate && next build",
     "start": "next start",
-    "postinstall": "prisma generate"
+    "postinstall": "prisma generate",
+
+    /* --- 任意：手動で使えるDBユーティリティ --- */
+    "db:push": "prisma db push",
+    "db:migrate": "prisma migrate deploy",
+    "db:studio": "prisma studio"
   },
   "dependencies": {
     "@prisma/client": "^5.22.0",
@@ -24,5 +30,4 @@
     "postcss": "^8.4.41",
     "autoprefixer": "^10.4.20"
   }
-
 }
