@@ -1,8 +1,11 @@
-// src/app/trending/page.tsx
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { Suspense, useEffect, useMemo, useRef, useState } from "react";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
+
+// 動的レンダー & キャッシュ無効化（プリレンダー回避）
+export const dynamic = "force-dynamic";
+export const revalidate = 0;
 
 // ===== ユーティリティ =====
 const nf = new Intl.NumberFormat("ja-JP");
@@ -22,10 +25,12 @@ const secsToLabel = (s?: number | null) => {
   const h = Math.floor(s / 3600);
   const m = Math.floor((s % 3600) / 60);
   const sec = Math.floor(s % 60);
-  return h > 0 ? `${h}:${String(m).padStart(2, "0")}:${String(sec).padStart(2, "0")}` : `${m}:${String(sec).padStart(2, "0")}`;
+  return h > 0
+    ? `${h}:${String(m).padStart(2, "0")}:${String(sec).padStart(2, "0")}`
+    : `${m}:${String(sec).padStart(2, "0")}`;
 };
 
-// ===== 型（APIの想定。無い項目はoptionalに） =====
+// ===== 型 =====
 type Video = {
   id: string;
   platform: "youtube";
@@ -38,11 +43,8 @@ type Video = {
   channelTitle?: string;
   views?: number | null;
   likes?: number | null;
-
-  // 急上昇用に返ってくるかもしれないメタ
   trendingRank?: number | null;
   trendingScore?: number | null;
-  // 24h/7d/30dでの増加分など（存在すればバッジ横に表示可能）
   deltaViews?: number | null;
   deltaLikes?: number | null;
 };
@@ -55,7 +57,7 @@ type ApiList = {
   total?: number;
 };
 
-// ===== バッジ（ツールチップ付き）=====
+// ===== バッジ =====
 function TrendingBadge({ rank, range }: { rank?: number | null; range: "1d" | "7d" | "30d" }) {
   const label = rank ? `#${rank}` : "急上昇";
   const rangeText = range === "1d" ? "24時間" : range === "7d" ? "7日間" : "30日間";
@@ -76,10 +78,13 @@ function TrendingBadge({ rank, range }: { rank?: number | null; range: "1d" | "7
 // ===== 動画カード =====
 function VideoCard({ v, range }: { v: Video; range: "1d" | "7d" | "30d" }) {
   return (
-    <a href={v.url} target="_blank" rel="noopener noreferrer"
-       className="group block rounded-2xl overflow-hidden bg-zinc-900 hover:bg-zinc-800 transition-colors">
+    <a
+      href={v.url}
+      target="_blank"
+      rel="noopener noreferrer"
+      className="group block rounded-2xl overflow-hidden bg-zinc-900 hover:bg-zinc-800 transition-colors"
+    >
       <div className="relative aspect-video bg-zinc-800">
-        {/* サムネ */}
         {v.thumbnailUrl ? (
           // eslint-disable-next-line @next/next/no-img-element
           <img
@@ -89,7 +94,6 @@ function VideoCard({ v, range }: { v: Video; range: "1d" | "7d" | "30d" }) {
             className="absolute inset-0 h-full w-full object-cover"
           />
         ) : null}
-        {/* 長さ */}
         {typeof v.durationSec === "number" && (
           <span className="absolute bottom-2 right-2 rounded bg-black/70 text-white text-[11px] px-1.5 py-0.5">
             {secsToLabel(v.durationSec)}
@@ -119,7 +123,7 @@ function VideoCard({ v, range }: { v: Video; range: "1d" | "7d" | "30d" }) {
   );
 }
 
-// ===== フィルタバー（61–300秒トグル＋並び確認）=====
+// ===== フィルタバー =====
 function FilterBar({
   range, minSec, maxSec, onChange
 }: {
@@ -130,7 +134,6 @@ function FilterBar({
   const isLenFilter = minSec === 61 && maxSec === 300;
   return (
     <div className="flex flex-wrap items-center gap-2">
-      {/* タブ */}
       {[
         { k: "1d", label: "24h" },
         { k: "7d", label: "7日" },
@@ -147,12 +150,13 @@ function FilterBar({
         </button>
       ))}
 
-      {/* 長さフィルタ */}
       <label className="ml-2 inline-flex items-center gap-2 text-sm bg-zinc-800 hover:bg-zinc-700 rounded-full px-3 py-1.5 cursor-pointer">
         <input
           type="checkbox"
           checked={isLenFilter}
-          onChange={(e) => onChange(e.target.checked ? { minSec: 61, maxSec: 300 } : { minSec: 0, maxSec: 60 * 60 })}
+          onChange={(e) =>
+            onChange(e.target.checked ? { minSec: 61, maxSec: 300 } : { minSec: 0, maxSec: 60 * 60 })
+          }
         />
         <span>長さ 61秒〜5分</span>
       </label>
@@ -162,27 +166,24 @@ function FilterBar({
   );
 }
 
-// ===== メインページ =====
-export default function TrendingPage() {
+// ===== 実ページ本体（useSearchParamsを使う）=====
+function TrendingPageInner() {
   const search = useSearchParams();
   const router = useRouter();
   const pathname = usePathname();
 
-  // URLクエリ → 状態（既定：range=1d, 61〜300s）
   const [range, setRange] = useState<"1d" | "7d" | "30d">(
     (search.get("range") as any) || "1d"
   );
   const [minSec, setMinSec] = useState<number>(parseInt(search.get("minSec") || "61", 10));
   const [maxSec, setMaxSec] = useState<number>(parseInt(search.get("maxSec") || "300", 10));
 
-  // 一覧データ（無限スクロール）
   const [items, setItems] = useState<Video[]>([]);
   const [page, setPage] = useState(1);
   const [hasMore, setHasMore] = useState(true);
   const [loading, setLoading] = useState(false);
   const sentinelRef = useRef<HTMLDivElement | null>(null);
 
-  // クエリをURLに同期
   const syncQuery = (next?: Partial<{ range: "1d" | "7d" | "30d"; minSec: number; maxSec: number }>) => {
     const r = next?.range ?? range;
     const mi = next?.minSec ?? minSec;
@@ -195,7 +196,6 @@ export default function TrendingPage() {
     router.replace(`${pathname}?${qs.toString()}`, { scroll: false });
   };
 
-  // 初回＆クエリ変更時にリセットして再取得
   useEffect(() => {
     setItems([]);
     setPage(1);
@@ -204,7 +204,6 @@ export default function TrendingPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [range, minSec, maxSec]);
 
-  // データ取得
   const queryString = useMemo(() => {
     const qs = new URLSearchParams();
     qs.set("sort", "trending");
@@ -232,32 +231,32 @@ export default function TrendingPage() {
       const rows = json?.items ?? [];
       setItems((prev) => (replace ? rows : [...prev, ...rows]));
       if (rows.length < 24) setHasMore(false);
-    } catch (e) {
-      // 失敗してもアプリは落とさない
+    } catch {
       setHasMore(false);
     } finally {
       setLoading(false);
     }
   }
 
-  // 交差オブザーバでページング
   useEffect(() => {
     if (!sentinelRef.current) return;
     const el = sentinelRef.current;
-    const ob = new IntersectionObserver((ents) => {
-      ents.forEach((ent) => {
-        if (ent.isIntersecting && !loading && hasMore) {
-          const next = page + 1;
-          setPage(next);
-          fetchPage(next);
-        }
-      });
-    }, { rootMargin: "600px 0px" });
+    const ob = new IntersectionObserver(
+      (ents) => {
+        ents.forEach((ent) => {
+          if (ent.isIntersecting && !loading && hasMore) {
+            const next = page + 1;
+            setPage(next);
+            fetchPage(next);
+          }
+        });
+      },
+      { rootMargin: "600px 0px" }
+    );
     ob.observe(el);
     return () => ob.disconnect();
   }, [page, loading, hasMore]);
 
-  // URLから入ってきた初回クエリを状態に反映
   useEffect(() => {
     const r = (search.get("range") as "1d" | "7d" | "30d") || "1d";
     const mi = parseInt(search.get("minSec") || "61", 10);
@@ -270,7 +269,6 @@ export default function TrendingPage() {
 
   return (
     <main className="mx-auto max-w-7xl px-4 py-6 space-y-4">
-      {/* 見出し＆フィルタ */}
       <div className="flex items-center justify-between">
         <h1 className="text-xl font-semibold text-zinc-100">急上昇</h1>
       </div>
@@ -287,7 +285,6 @@ export default function TrendingPage() {
         }}
       />
 
-      {/* グリッド */}
       <section
         className="
           grid gap-4
@@ -302,11 +299,8 @@ export default function TrendingPage() {
         ))}
       </section>
 
-      {/* ロード中・終端 */}
       <div ref={sentinelRef} />
-      {loading && (
-        <div className="text-center text-sm text-zinc-400 py-4">読み込み中…</div>
-      )}
+      {loading && <div className="text-center text-sm text-zinc-400 py-4">読み込み中…</div>}
       {!hasMore && !loading && items.length > 0 && (
         <div className="text-center text-sm text-zinc-500 py-6">以上です</div>
       )}
@@ -314,5 +308,20 @@ export default function TrendingPage() {
         <div className="text-center text-sm text-zinc-500 py-10">該当する動画がありません</div>
       )}
     </main>
+  );
+}
+
+// ===== ページのデフォルトエクスポート（Suspenseでラップ）=====
+export default function TrendingPage() {
+  return (
+    <Suspense
+      fallback={
+        <main className="mx-auto max-w-7xl px-4 py-6">
+          <div className="text-center text-sm text-zinc-400 py-4">読み込み中…</div>
+        </main>
+      }
+    >
+      <TrendingPageInner />
+    </Suspense>
   );
 }
