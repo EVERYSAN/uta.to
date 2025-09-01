@@ -4,7 +4,6 @@ import { Prisma, PrismaClient } from "@prisma/client";
 
 const prisma = new PrismaClient();
 
-// 便利関数
 const toInt = (v: string | null, d: number) => {
   const n = v ? parseInt(v, 10) : NaN;
   return Number.isFinite(n) ? n : d;
@@ -20,12 +19,12 @@ const RANGE_TO_HOURS: Record<RangeKey, number> = {
   "30d": 30 * 24,
 };
 
-// ショートの境界（60秒以下をショート）
+// 60秒以下をショート、61〜300秒を“通常”とみなす
 const MAX_SHORT_SEC = 60;
 const MIN_LONG_SEC = 61;
 const MAX_LONG_SEC = 300;
 
-// レスポンスで返す共通の select
+// 返却フィールド
 const videoSelect = {
   id: true,
   platform: true,
@@ -53,7 +52,7 @@ export async function GET(req: NextRequest) {
     const take = Math.min(50, Math.max(1, toInt(sp.get("take"), 50)));
     const skip = (page - 1) * take;
 
-    // ベースの where
+    // ベース where
     let where: Prisma.VideoWhereInput = {
       platform: "youtube",
       ...(q.length > 0
@@ -67,39 +66,44 @@ export async function GET(req: NextRequest) {
         : {}),
     };
 
-    // --- 尺ベースのショート絞り込み ---
+    // ANDの現在値を安全に配列化
+    const currAND: Prisma.VideoWhereInput[] = Array.isArray(where.AND)
+      ? (where.AND as Prisma.VideoWhereInput[])
+      : where.AND
+      ? [where.AND as Prisma.VideoWhereInput]
+      : [];
+
+    // 尺ベースのショート切替
     if (shorts === "exclude") {
-      // 61〜300秒を優先しつつ、durationSec=null の古いレコードは許容
+      // 61〜300秒を優先。durationSec=null(古いデータ)は許容して落ちすぎを防止
       where.AND = [
-        ...(where.AND ?? []),
+        ...currAND,
         { OR: [{ durationSec: { gte: MIN_LONG_SEC, lte: MAX_LONG_SEC } }, { durationSec: null }] },
       ];
     } else if (shorts === "only") {
-      // 60秒以下のみ
-      where.AND = [...(where.AND ?? []), { durationSec: { lte: MAX_SHORT_SEC } }];
+      where.AND = [...currAND, { durationSec: { lte: MAX_SHORT_SEC } }];
+    } else {
+      // all のときは currAND を維持
+      if (currAND.length > 0) where.AND = currAND;
     }
-    // -------------------------------
 
-    // 共通の件数（trending は期間で絞るので後で上書きする）
+    // いったん件数（trending は後で上書き）
     let total = await prisma.video.count({ where });
 
-    // ---- ソートごとに処理 ----
+    // ---- ソート別 ----
     if (sort === "trending") {
-      // 期間内のものを集めてスコア計算（軽量の擬似トレンド）
       const hours = RANGE_TO_HOURS[range] ?? 24;
       const since = new Date(Date.now() - hours * 3600 * 1000);
 
       const trendWhere: Prisma.VideoWhereInput = {
         ...where,
         publishedAt: { gte: since },
-        // views が存在するものを優先（null も許容したい場合はコメントアウト）
-        // views: { not: null },
       };
 
       const candidates = await prisma.video.findMany({
         where: trendWhere,
-        orderBy: [{ publishedAt: "desc" }], // まずは新しめから
-        take: 1000, // 計算対象の上限（DBが小さいので十分）
+        orderBy: [{ publishedAt: "desc" }],
+        take: 1000,
         select: videoSelect,
       });
 
@@ -111,8 +115,6 @@ export async function GET(req: NextRequest) {
           v.publishedAt ? (now - new Date(v.publishedAt).getTime()) / 3600000 : 9999;
         const views = v.views ?? 0;
         const likes = v.likes ?? 0;
-
-        // 簡易トレンドスコア（適当係数）
         const score = (views + likes * 5) / Math.pow(ageHrs + 2, 1.5);
         return { v, score };
       });
@@ -123,18 +125,14 @@ export async function GET(req: NextRequest) {
       return Response.json({ ok: true, total, page, take, items });
     }
 
-    // new / views / likes
     let orderBy: Prisma.VideoOrderByWithRelationInput[] = [];
-
     if (sort === "new") {
       orderBy = [{ publishedAt: "desc" }];
     } else if (sort === "views") {
-      // Postgres は DESC で NULLS LAST がデフォルト
       orderBy = [{ views: "desc" }, { publishedAt: "desc" }];
     } else if (sort === "likes") {
       orderBy = [{ likes: "desc" }, { publishedAt: "desc" }];
     } else {
-      // 未知の sort は new と同じ
       orderBy = [{ publishedAt: "desc" }];
     }
 
