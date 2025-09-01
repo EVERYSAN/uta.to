@@ -57,8 +57,6 @@ function TrendingBadge({ rank, range }: { rank?: number | null; range: "1d" | "7
     <div className="inline-flex items-center gap-1 rounded-full bg-violet-600/20 text-violet-300 px-2 py-0.5 text-[11px]">
       <span>⬆</span><span className="font-medium">{label}</span>
       <span className="opacity-70">/ {rangeText}</span>
-      <span className="ml-1 cursor-help group relative select-none">
-      </span>
     </div>
   );
 }
@@ -66,13 +64,21 @@ function TrendingBadge({ rank, range }: { rank?: number | null; range: "1d" | "7
 // ===== 動画カード =====
 function VideoCard({ v, range }: { v: Video; range: "1d" | "7d" | "30d" }) {
   return (
-    <a href={v.url} target="_blank" rel="noopener noreferrer"
-       className="group block rounded-2xl overflow-hidden bg-zinc-900 hover:bg-zinc-800 transition-colors">
+    <a
+      href={v.url}
+      target="_blank"
+      rel="noopener noreferrer"
+      className="group block rounded-2xl overflow-hidden bg-zinc-900 hover:bg-zinc-800 transition-colors"
+    >
       <div className="relative aspect-video bg-zinc-800">
         {v.thumbnailUrl && (
           // eslint-disable-next-line @next/next/no-img-element
-          <img src={v.thumbnailUrl} alt={v.title} loading="lazy"
-               className="absolute inset-0 h-full w-full object-cover" />
+          <img
+            src={v.thumbnailUrl}
+            alt={v.title}
+            loading="lazy"
+            className="absolute inset-0 h-full w-full object-cover"
+          />
         )}
         {typeof v.durationSec === "number" && (
           <span className="absolute bottom-2 right-2 rounded bg-black/70 text-white text-[11px] px-1.5 py-0.5">
@@ -101,40 +107,57 @@ function VideoCard({ v, range }: { v: Video; range: "1d" | "7d" | "30d" }) {
   );
 }
 
-// ===== フィルタバー =====
+// ===== フィルタバー（#shorts用 3 状態）=====
+type ShortsMode = "all" | "exclude" | "only";
+
 function FilterBar({
-  range, minSec, maxSec, onChange
+  range,
+  shorts,
+  onChange,
 }: {
   range: "1d" | "7d" | "30d";
-  minSec: number; maxSec: number;
-  onChange: (next: Partial<{ range: "1d" | "7d" | "30d"; minSec: number; maxSec: number; }>) => void;
+  shorts: ShortsMode;
+  onChange: (next: Partial<{ range: "1d" | "7d" | "30d"; shorts: ShortsMode }>) => void;
 }) {
-  const isLenFilter = minSec === 61 && maxSec === 300;
+  const rangeBtns = [
+    { k: "1d", label: "24h" },
+    { k: "7d", label: "7日" },
+    { k: "30d", label: "30日" },
+  ] as const;
+
+  const shortsBtns = [
+    { k: "all", label: "すべて" },
+    { k: "exclude", label: "ショート除外" },
+    { k: "only", label: "#shortsのみ" },
+  ] as const;
+
   return (
     <div className="flex flex-wrap items-center gap-2">
-      {[
-        { k: "1d", label: "24h" },
-        { k: "7d", label: "7日" },
-        { k: "30d", label: "30日" },
-      ].map(({ k, label }) => (
-        <button key={k} onClick={() => onChange({ range: k as any })}
+      {rangeBtns.map(({ k, label }) => (
+        <button
+          key={k}
+          onClick={() => onChange({ range: k as any })}
           className={`px-3 py-1.5 rounded-full text-sm ${
             range === k ? "bg-violet-600 text-white" : "bg-zinc-800 text-zinc-200 hover:bg-zinc-700"
-          }`}>
+          }`}
+        >
           {label}
         </button>
       ))}
 
-      <label className="ml-2 inline-flex items-center gap-2 text-sm bg-zinc-800 hover:bg-zinc-700 text-white rounded-full px-3 py-1.5 cursor-pointer">
-        <input
-          type="checkbox"
-          checked={isLenFilter}
-          onChange={(e) =>
-            onChange(e.target.checked ? { minSec: 61, maxSec: 300 } : { minSec: 0, maxSec: 60 * 60 })
-          }
-        />
-        <span>長さ 61秒〜5分</span>
-      </label>
+      <div className="ml-2 inline-flex rounded-full bg-zinc-800 p-1">
+        {shortsBtns.map(({ k, label }) => (
+          <button
+            key={k}
+            onClick={() => onChange({ shorts: k as ShortsMode })}
+            className={`px-3 py-1.5 rounded-full text-sm ${
+              shorts === k ? "bg-violet-600 text-white" : "text-zinc-200 hover:bg-zinc-700"
+            }`}
+          >
+            {label}
+          </button>
+        ))}
+      </div>
 
       <span className="text-xs text-zinc-500 ml-auto">並び: 急上昇</span>
     </div>
@@ -148,8 +171,7 @@ function TrendingPageInner() {
   const pathname = usePathname();
 
   const [range, setRange] = useState<"1d" | "7d" | "30d">((search.get("range") as any) || "1d");
-  const [minSec, setMinSec] = useState<number>(parseInt(search.get("minSec") || "61", 10));
-  const [maxSec, setMaxSec] = useState<number>(parseInt(search.get("maxSec") || "300", 10));
+  const [shorts, setShorts] = useState<ShortsMode>((search.get("shorts") as ShortsMode) || "all");
 
   const [items, setItems] = useState<Video[]>([]);
   const [page, setPage] = useState(1);
@@ -157,34 +179,33 @@ function TrendingPageInner() {
   const [loading, setLoading] = useState(false);
   const sentinelRef = useRef<HTMLDivElement | null>(null);
 
-  const syncQuery = (next?: Partial<{ range: "1d" | "7d" | "30d"; minSec: number; maxSec: number }>) => {
+  const syncQuery = (next?: Partial<{ range: "1d" | "7d" | "30d"; shorts: ShortsMode }>) => {
     const r = next?.range ?? range;
-    const mi = next?.minSec ?? minSec;
-    const ma = next?.maxSec ?? maxSec;
+    const s = next?.shorts ?? shorts;
     const qs = new URLSearchParams(search.toString());
     qs.set("sort", "trending");
     qs.set("range", r);
-    qs.set("minSec", String(mi));
-    qs.set("maxSec", String(ma));
+    qs.set("shorts", s);
     router.replace(`${pathname}?${qs.toString()}`, { scroll: false });
   };
 
   useEffect(() => {
-    setItems([]); setPage(1); setHasMore(true);
+    setItems([]);
+    setPage(1);
+    setHasMore(true);
     fetchPage(1, true);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [range, minSec, maxSec]);
+  }, [range, shorts]);
 
   const queryString = useMemo(() => {
     const qs = new URLSearchParams();
     qs.set("sort", "trending");
     qs.set("range", range);
-    qs.set("minSec", String(minSec));
-    qs.set("maxSec", String(maxSec));
+    qs.set("shorts", shorts);
     qs.set("page", String(page));
     qs.set("take", "24");
     return qs.toString();
-  }, [range, minSec, maxSec, page]);
+  }, [range, shorts, page]);
 
   async function fetchPage(p: number, replace = false) {
     if (loading || !hasMore) return;
@@ -193,8 +214,7 @@ function TrendingPageInner() {
       const qs = new URLSearchParams();
       qs.set("sort", "trending");
       qs.set("range", range);
-      qs.set("minSec", String(minSec));
-      qs.set("maxSec", String(maxSec));
+      qs.set("shorts", shorts);
       qs.set("page", String(p));
       qs.set("take", "24");
       const res = await fetch(`/api/videos?${qs.toString()}`, { cache: "no-store" });
@@ -230,34 +250,33 @@ function TrendingPageInner() {
 
   useEffect(() => {
     const r = (search.get("range") as "1d" | "7d" | "30d") || "1d";
-    const mi = parseInt(search.get("minSec") || "61", 10);
-    const ma = parseInt(search.get("maxSec") || "300", 10);
+    const s = (search.get("shorts") as ShortsMode) || "all";
     setRange(r);
-    setMinSec(isNaN(mi) ? 61 : mi);
-    setMaxSec(isNaN(ma) ? 300 : ma);
+    setShorts(s);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []); // 初回のみ
 
   return (
     <main className="mx-auto max-w-7xl px-4 py-6 space-y-4">
       <div className="flex items-center justify-between">
+        {/* ① 黒文字でコントラスト確保 */}
         <h1 className="text-2xl md:text-3xl font-bold text-black dark:text-black">急上昇</h1>
       </div>
 
       <FilterBar
         range={range}
-        minSec={minSec}
-        maxSec={maxSec}
+        shorts={shorts}
         onChange={(next) => {
           if (next.range) setRange(next.range);
-          if (typeof next.minSec === "number") setMinSec(next.minSec);
-          if (typeof next.maxSec === "number") setMaxSec(next.maxSec);
+          if (next.shorts) setShorts(next.shorts);
           syncQuery(next);
         }}
       />
 
       <section className="grid gap-4 grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4">
-        {items.map((v) => (<VideoCard key={v.id} v={v} range={range} />))}
+        {items.map((v) => (
+          <VideoCard key={v.id} v={v} range={range} />
+        ))}
       </section>
 
       <div ref={sentinelRef} />
