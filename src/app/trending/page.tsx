@@ -57,9 +57,8 @@ function TrendingBadge({ rank, range }: { rank?: number | null; range: "1d" | "7
     <div className="inline-flex items-center gap-1 rounded-full bg-violet-600/20 text-violet-300 px-2 py-0.5 text-[11px]">
       <span>⬆</span><span className="font-medium">{label}</span>
       <span className="opacity-70">/ {rangeText}</span>
-      <span className="ml-1 cursor-help group relative select-none">ⓘ
+      <span className="ml-1 cursor-help group relative select-none">
         <span className="pointer-events-none hidden group-hover:block absolute left-1/2 -translate-x-1/2 top-6 w-72 rounded-md bg-zinc-900 p-3 text-xs text-zinc-200 shadow-xl z-10">
-          急上昇スコアは直近期間の「再生増加」「高評価増加」「公開からの新しさ」を総合評価しています（例：24h=昨日比）。表示は独自集計です。
         </span>
       </span>
     </div>
@@ -128,7 +127,7 @@ function FilterBar({
         </button>
       ))}
 
-      <label className="ml-2 inline-flex items-center gap-2 text-sm bg-zinc-800 hover:bg-zinc-100 rounded-full px-3 py-1.5 cursor-pointer">
+      <label className="ml-2 inline-flex items-center gap-2 text-sm bg-zinc-800 hover:bg-zinc-700 rounded-full px-3 py-1.5 cursor-pointer">
         <input
           type="checkbox"
           checked={isLenFilter}
@@ -139,7 +138,7 @@ function FilterBar({
         <span>長さ 61秒〜5分</span>
       </label>
 
-      <span className="text-xs text-zinc-500 ml-auto">並び: 急上昇</span>
+      <span className="text-xs text-zinc-100 ml-auto">並び: 急上昇</span>
     </div>
   );
 }
