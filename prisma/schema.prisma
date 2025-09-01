@@ -38,11 +38,15 @@ model Video {
   rawJson          Json?
   createdAt        DateTime @default(now())
   updatedAt        DateTime @updatedAt
+  metrics          VideoMetric[]
 
   // 逆方向 relation
   statsSnapshots   StatsSnapshot[]
 
   @@unique([platform, platformVideoId])
+  @@index([publishedAt])
+  @@index([views])
+  @@index([likes])
 }
 
 model StatsSnapshot {
@@ -54,6 +58,19 @@ model StatsSnapshot {
   likes      Int?
   comments   Int?
   bookmarks  Int?
+}
+
+model VideoMetric {
+  id       String   @id @default(cuid())
+  videoId  String
+  date     DateTime      // UTCの00:00（1日単位のスナップショット）
+  views    Int       @default(0)
+  likes    Int       @default(0)
+
+  video    Video     @relation(fields: [videoId], references: [id], onDelete: Cascade)
+
+  @@unique([videoId, date], name: "videoId_date")
+  @@index([date])
 }
 
 
