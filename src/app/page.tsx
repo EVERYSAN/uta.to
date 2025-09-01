@@ -1,5 +1,6 @@
 import Link from "next/link";
 import { prisma } from "@/lib/prisma";
+import { redirect } from "next/navigation";
 
 const PAGE_SIZE = 50;
 const MAX_TOTAL = 1000;
@@ -26,6 +27,9 @@ function makeQuery(base: SearchParams, patch: Partial<SearchParams>) {
 
   const qs = params.toString();
   return qs ? `/?${qs}` : "/";
+}
+export default function Home() {
+  redirect("/trending");
 }
 
 export default async function Page({
@@ -229,3 +233,4 @@ export default async function Page({
     </main>
   );
 }
+
