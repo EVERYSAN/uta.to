@@ -128,7 +128,7 @@ function FilterBar({
         </button>
       ))}
 
-      <label className="ml-2 inline-flex items-center gap-2 text-sm bg-zinc-800 hover:bg-zinc-700 rounded-full px-3 py-1.5 cursor-pointer">
+      <label className="ml-2 inline-flex items-center gap-2 text-sm bg-zinc-800 hover:bg-zinc-100 rounded-full px-3 py-1.5 cursor-pointer">
         <input
           type="checkbox"
           checked={isLenFilter}
