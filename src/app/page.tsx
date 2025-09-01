@@ -28,9 +28,6 @@ function makeQuery(base: SearchParams, patch: Partial<SearchParams>) {
   const qs = params.toString();
   return qs ? `/?${qs}` : "/";
 }
-export default function Home() {
-  redirect("/trending");
-}
 
 export default async function Page({
   searchParams,
@@ -233,4 +230,5 @@ export default async function Page({
     </main>
   );
 }
+
 
