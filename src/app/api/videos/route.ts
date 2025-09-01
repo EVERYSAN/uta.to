@@ -1,152 +1,117 @@
-// /src/app/api/videos/route.ts
-import { NextRequest } from "next/server";
-import { Prisma, PrismaClient } from "@prisma/client";
+import { NextRequest, NextResponse } from "next/server";
+import { Prisma } from "@prisma/client";
+import { prisma } from "@/lib/prisma"; // 既存のパスに合わせてください
 
-const prisma = new PrismaClient();
-
-const toInt = (v: string | null, d: number) => {
-  const n = v ? parseInt(v, 10) : NaN;
-  return Number.isFinite(n) ? n : d;
-};
-
-type SortKey = "trending" | "new" | "views" | "likes";
-type RangeKey = "1d" | "7d" | "30d";
-type ShortsMode = "all" | "exclude" | "only";
-
-const RANGE_TO_HOURS: Record<RangeKey, number> = {
-  "1d": 24,
-  "7d": 7 * 24,
-  "30d": 30 * 24,
-};
-
-// 60秒以下をショート、61〜300秒を“通常”とみなす
-const MAX_SHORT_SEC = 60;
+// 「ショート除外」は 61〜300 秒をメインに、duration 未収集(null)も許容
 const MIN_LONG_SEC = 61;
 const MAX_LONG_SEC = 300;
 
-// 返却フィールド
-const videoSelect = {
-  id: true,
-  platform: true,
-  platformVideoId: true,
-  title: true,
-  url: true,
-  thumbnailUrl: true,
-  durationSec: true,
-  publishedAt: true,
-  channelTitle: true,
-  views: true,
-  likes: true,
-} satisfies Prisma.VideoSelect;
+type ShortsMode = "all" | "exclude";
+type RangeKey = "1d" | "7d" | "30d";
+
+/**
+ * 範囲フィルタ（簡易版）：publishedAt の下限を切る
+ *  - データにより変える場合はここを調整
+ */
+function rangeToDateLowerBound(range: RangeKey): Date {
+  const now = new Date();
+  const d = new Date(now);
+  if (range === "1d") d.setDate(now.getDate() - 1);
+  else if (range === "7d") d.setDate(now.getDate() - 7);
+  else d.setDate(now.getDate() - 30);
+  return d;
+}
+
+/** 並びを「決定的」にする orderBy（タイブレークまで固定） */
+function stableOrderBy() {
+  return [
+    // ここをトレンド専用列に変更したい場合は最上位に追加
+    // 例: { trendingScore1d: { sort: "desc", nulls: "last" } } as any,
+    { views: { sort: "desc", nulls: "last" } } as any,
+    { likes: { sort: "desc", nulls: "last" } } as any,
+    { publishedAt: { sort: "desc", nulls: "last" } } as any,
+    { id: "asc" as const },
+  ];
+}
 
 export async function GET(req: NextRequest) {
   try {
-    const sp = req.nextUrl.searchParams;
+    const url = new URL(req.url);
+    const sp = url.searchParams;
 
-    const q = (sp.get("q") ?? "").trim();
-    const sort = (sp.get("sort") ?? "trending") as SortKey;
-    const range = (sp.get("range") ?? "1d") as RangeKey;
-    const shorts = (sp.get("shorts") ?? "all") as ShortsMode;
+    // 使うパラメータ
+    const range = (sp.get("range") as RangeKey) || "1d";
+    const shortsRaw = (sp.get("shorts") as ShortsMode | "only") || "all";
+    const shorts: ShortsMode = shortsRaw === "exclude" ? "exclude" : "all";
 
-    const page = Math.max(1, toInt(sp.get("page"), 1));
-    const take = Math.min(50, Math.max(1, toInt(sp.get("take"), 50)));
+    const page = Math.max(1, parseInt(sp.get("page") ?? "1", 10) || 1);
+    const take = Math.min(50, Math.max(1, parseInt(sp.get("take") ?? "24", 10) || 24));
     const skip = (page - 1) * take;
 
-    // ベース where
-    let where: Prisma.VideoWhereInput = {
-      platform: "youtube",
-      ...(q.length > 0
-        ? {
-            OR: [
-              { title: { contains: q, mode: "insensitive" } },
-              { description: { contains: q, mode: "insensitive" } },
-              { channelTitle: { contains: q, mode: "insensitive" } },
-            ],
-          }
-        : {}),
-    };
+    const q = (sp.get("q") ?? "").trim();
 
-    // ANDの現在値を安全に配列化
-    const currAND: Prisma.VideoWhereInput[] = Array.isArray(where.AND)
-      ? (where.AND as Prisma.VideoWhereInput[])
-      : where.AND
-      ? [where.AND as Prisma.VideoWhereInput]
-      : [];
+    // ---- where の組み立て ----
+    const where: Prisma.VideoWhereInput = { platform: "youtube" };
 
-    // 尺ベースのショート切替
-    if (shorts === "exclude") {
-      // 61〜300秒を優先。durationSec=null(古いデータ)は許容して落ちすぎを防止
-      where.AND = [
-        ...currAND,
-        { OR: [{ durationSec: { gte: MIN_LONG_SEC, lte: MAX_LONG_SEC } }, { durationSec: null }] },
+    // 期間（下限）フィルタ：publishedAt が十分新しいもの
+    const lower = rangeToDateLowerBound(range);
+    where.publishedAt = { gte: lower };
+
+    // テキスト検索（タイトル / 説明 / チャンネル名 など任意の列に合わせて調整可）
+    if (q.length > 0) {
+      where.OR = [
+        { title: { contains: q, mode: "insensitive" } },
+        { channelTitle: { contains: q, mode: "insensitive" } },
+        // { description: { contains: q, mode: "insensitive" } }, // 説明を持っているなら
       ];
-    } else if (shorts === "only") {
-      where.AND = [...currAND, { durationSec: { lte: MAX_SHORT_SEC } }];
-    } else {
-      // all のときは currAND を維持
-      if (currAND.length > 0) where.AND = currAND;
     }
 
-    // いったん件数（trending は後で上書き）
-    let total = await prisma.video.count({ where });
-
-    // ---- ソート別 ----
-    if (sort === "trending") {
-      const hours = RANGE_TO_HOURS[range] ?? 24;
-      const since = new Date(Date.now() - hours * 3600 * 1000);
-
-      const trendWhere: Prisma.VideoWhereInput = {
-        ...where,
-        publishedAt: { gte: since },
-      };
-
-      const candidates = await prisma.video.findMany({
-        where: trendWhere,
-        orderBy: [{ publishedAt: "desc" }],
-        take: 1000,
-        select: videoSelect,
-      });
-
-      total = candidates.length;
-
-      const now = Date.now();
-      const scored = candidates.map((v) => {
-        const ageHrs =
-          v.publishedAt ? (now - new Date(v.publishedAt).getTime()) / 3600000 : 9999;
-        const views = v.views ?? 0;
-        const likes = v.likes ?? 0;
-        const score = (views + likes * 5) / Math.pow(ageHrs + 2, 1.5);
-        return { v, score };
-      });
-
-      scored.sort((a, b) => b.score - a.score);
-
-      const items = scored.slice(skip, skip + take).map((s) => s.v);
-      return Response.json({ ok: true, total, page, take, items });
+    // ショート除外：61〜300 秒 or 収集前(null) を許容
+    if (shorts === "exclude") {
+      where.AND = [
+        ...(Array.isArray(where.AND) ? (where.AND as Prisma.VideoWhereInput[]) : []),
+        {
+          OR: [
+            { durationSec: { gte: MIN_LONG_SEC, lte: MAX_LONG_SEC } },
+            { durationSec: null },
+          ],
+        },
+      ];
     }
 
-    let orderBy: Prisma.VideoOrderByWithRelationInput[] = [];
-    if (sort === "new") {
-      orderBy = [{ publishedAt: "desc" }];
-    } else if (sort === "views") {
-      orderBy = [{ views: "desc" }, { publishedAt: "desc" }];
-    } else if (sort === "likes") {
-      orderBy = [{ likes: "desc" }, { publishedAt: "desc" }];
-    } else {
-      orderBy = [{ publishedAt: "desc" }];
-    }
+    // ---- 取得 ----
+    const [items, total] = await Promise.all([
+      prisma.video.findMany({
+        where,
+        orderBy: stableOrderBy(),
+        skip,
+        take,
+        select: {
+          id: true,
+          platform: true,
+          platformVideoId: true,
+          title: true,
+          url: true,
+          thumbnailUrl: true,
+          durationSec: true,
+          publishedAt: true,
+          channelTitle: true,
+          views: true,
+          likes: true,
+          // trendingRank / trendingScore を保持しているなら true に
+          trendingRank: false as any,
+          trendingScore: false as any,
+        },
+      }),
+      prisma.video.count({ where }),
+    ]);
 
-    const rows = await prisma.video.findMany({
-      where,
-      orderBy,
-      skip,
-      take,
-      select: videoSelect,
-    });
-
-    return Response.json({ ok: true, total, page, take, items: rows });
-  } catch (err: any) {
-    console.error("GET /api/videos error", err);
-    return Response.json({ ok: false, error: String(err?.message ?? err) }, { status: 500 });
+    return NextResponse.json(
+      { ok: true, items, page, take, total },
+      { status: 200, headers: { "Cache-Control": "no-store" } }
+    );
+  } catch (err) {
+    console.error(err);
+    return NextResponse.json({ ok: false, error: "internal_error" }, { status: 500 });
   }
 }
