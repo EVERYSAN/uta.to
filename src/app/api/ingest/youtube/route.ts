@@ -31,7 +31,7 @@ function iso8601DurationToSec(iso?: string | null): number | null {
   const mi = parseInt(m[2] ?? "0", 10);
   const s = parseInt(m[3] ?? "0", 10);
   return h * 3600 + mi * 60 + s;
-}
+};
 function isAuthorized(req: NextRequest) {
   const q = req.nextUrl.searchParams.get("secret");
   const h = req.headers.get("x-cron-secret");
@@ -202,4 +202,5 @@ export async function GET(req: Request) {
     updated,
   });
 }
+
 
