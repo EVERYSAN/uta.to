@@ -3,9 +3,8 @@
 import { Suspense, useEffect, useMemo, useRef, useState } from "react";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 
-// 動的レンダー & キャッシュ無効化（プリレンダー回避）
+// 動的レンダー（プリレンダーの絡みを回避）
 export const dynamic = "force-dynamic";
-export const revalidate = 0;
 
 // ===== ユーティリティ =====
 const nf = new Intl.NumberFormat("ja-JP");
@@ -39,7 +38,7 @@ type Video = {
   url: string;
   thumbnailUrl?: string;
   durationSec?: number | null;
-  publishedAt?: string; // ISO
+  publishedAt?: string;
   channelTitle?: string;
   views?: number | null;
   likes?: number | null;
@@ -48,14 +47,7 @@ type Video = {
   deltaViews?: number | null;
   deltaLikes?: number | null;
 };
-
-type ApiList = {
-  ok: boolean;
-  items: Video[];
-  page?: number;
-  take?: number;
-  total?: number;
-};
+type ApiList = { ok: boolean; items: Video[]; page?: number; take?: number; total?: number };
 
 // ===== バッジ =====
 function TrendingBadge({ rank, range }: { rank?: number | null; range: "1d" | "7d" | "30d" }) {
@@ -63,12 +55,11 @@ function TrendingBadge({ rank, range }: { rank?: number | null; range: "1d" | "7
   const rangeText = range === "1d" ? "24時間" : range === "7d" ? "7日間" : "30日間";
   return (
     <div className="inline-flex items-center gap-1 rounded-full bg-violet-600/20 text-violet-300 px-2 py-0.5 text-[11px]">
-      <span>⬆</span>
-      <span className="font-medium">{label}</span>
+      <span>⬆</span><span className="font-medium">{label}</span>
       <span className="opacity-70">/ {rangeText}</span>
       <span className="ml-1 cursor-help group relative select-none">ⓘ
         <span className="pointer-events-none hidden group-hover:block absolute left-1/2 -translate-x-1/2 top-6 w-72 rounded-md bg-zinc-900 p-3 text-xs text-zinc-200 shadow-xl z-10">
-          急上昇スコアは直近期間の「再生増加」「高評価増加」「公開からの新しさ」を総合評価しています（例：24h=昨日比）。表示は独自集計で、YouTube公式の急上昇とは異なります。
+          急上昇スコアは直近期間の「再生増加」「高評価増加」「公開からの新しさ」を総合評価しています（例：24h=昨日比）。表示は独自集計です。
         </span>
       </span>
     </div>
@@ -78,22 +69,14 @@ function TrendingBadge({ rank, range }: { rank?: number | null; range: "1d" | "7
 // ===== 動画カード =====
 function VideoCard({ v, range }: { v: Video; range: "1d" | "7d" | "30d" }) {
   return (
-    <a
-      href={v.url}
-      target="_blank"
-      rel="noopener noreferrer"
-      className="group block rounded-2xl overflow-hidden bg-zinc-900 hover:bg-zinc-800 transition-colors"
-    >
+    <a href={v.url} target="_blank" rel="noopener noreferrer"
+       className="group block rounded-2xl overflow-hidden bg-zinc-900 hover:bg-zinc-800 transition-colors">
       <div className="relative aspect-video bg-zinc-800">
-        {v.thumbnailUrl ? (
+        {v.thumbnailUrl && (
           // eslint-disable-next-line @next/next/no-img-element
-          <img
-            src={v.thumbnailUrl}
-            alt={v.title}
-            loading="lazy"
-            className="absolute inset-0 h-full w-full object-cover"
-          />
-        ) : null}
+          <img src={v.thumbnailUrl} alt={v.title} loading="lazy"
+               className="absolute inset-0 h-full w-full object-cover" />
+        )}
         {typeof v.durationSec === "number" && (
           <span className="absolute bottom-2 right-2 rounded bg-black/70 text-white text-[11px] px-1.5 py-0.5">
             {secsToLabel(v.durationSec)}
@@ -107,9 +90,7 @@ function VideoCard({ v, range }: { v: Video; range: "1d" | "7d" | "30d" }) {
           <div className="text-[11px] text-zinc-400">{fmtDate(v.publishedAt)}</div>
         </div>
 
-        <h3 className="text-sm font-semibold leading-snug line-clamp-2 text-zinc-100">
-          {v.title}
-        </h3>
+        <h3 className="text-sm font-semibold leading-snug line-clamp-2 text-zinc-100">{v.title}</h3>
 
         <div className="flex items-center gap-3 text-[12px] text-zinc-400">
           <span className="inline-flex items-center gap-1">👁 {fmtCount(v.views)}</span>
@@ -139,13 +120,10 @@ function FilterBar({
         { k: "7d", label: "7日" },
         { k: "30d", label: "30日" },
       ].map(({ k, label }) => (
-        <button
-          key={k}
-          onClick={() => onChange({ range: k as any })}
+        <button key={k} onClick={() => onChange({ range: k as any })}
           className={`px-3 py-1.5 rounded-full text-sm ${
             range === k ? "bg-violet-600 text-white" : "bg-zinc-800 text-zinc-200 hover:bg-zinc-700"
-          }`}
-        >
+          }`}>
           {label}
         </button>
       ))}
@@ -166,15 +144,13 @@ function FilterBar({
   );
 }
 
-// ===== 実ページ本体（useSearchParamsを使う）=====
+// ===== 中身（useSearchParams を使う）=====
 function TrendingPageInner() {
   const search = useSearchParams();
   const router = useRouter();
   const pathname = usePathname();
 
-  const [range, setRange] = useState<"1d" | "7d" | "30d">(
-    (search.get("range") as any) || "1d"
-  );
+  const [range, setRange] = useState<"1d" | "7d" | "30d">((search.get("range") as any) || "1d");
   const [minSec, setMinSec] = useState<number>(parseInt(search.get("minSec") || "61", 10));
   const [maxSec, setMaxSec] = useState<number>(parseInt(search.get("maxSec") || "300", 10));
 
@@ -197,9 +173,7 @@ function TrendingPageInner() {
   };
 
   useEffect(() => {
-    setItems([]);
-    setPage(1);
-    setHasMore(true);
+    setItems([]); setPage(1); setHasMore(true);
     fetchPage(1, true);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [range, minSec, maxSec]);
@@ -285,18 +259,8 @@ function TrendingPageInner() {
         }}
       />
 
-      <section
-        className="
-          grid gap-4
-          grid-cols-1
-          sm:grid-cols-2
-          xl:grid-cols-3
-          2xl:grid-cols-4
-        "
-      >
-        {items.map((v) => (
-          <VideoCard key={v.id} v={v} range={range} />
-        ))}
+      <section className="grid gap-4 grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4">
+        {items.map((v) => (<VideoCard key={v.id} v={v} range={range} />))}
       </section>
 
       <div ref={sentinelRef} />
@@ -311,7 +275,7 @@ function TrendingPageInner() {
   );
 }
 
-// ===== ページのデフォルトエクスポート（Suspenseでラップ）=====
+// ===== Suspense でラップ =====
 export default function TrendingPage() {
   return (
     <Suspense
