@@ -1,6 +1,7 @@
 // src/app/api/ingest/youtube/route.ts
 import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
+import type { NextRequest } from "next/server";
 
 type YtSearchItem = {
   id?: { videoId?: string };
@@ -202,6 +203,7 @@ export async function GET(req: Request) {
     updated,
   });
 }
+
 
 
 
