@@ -33,6 +33,39 @@ const secsToLabel = (s?: number | null) => {
     : `${m}:${String(sec).padStart(2, '0')}`;
 };
 
+/** ★追加: URL/ID/shorts から 11桁のYouTube IDを抽出 */
+function toYouTubeId(input?: string | null): string | null {
+  if (!input) return null;
+  if (/^[a-zA-Z0-9_-]{11}$/.test(input)) return input; // 既にID
+
+  try {
+    const u = new URL(input);
+    const host = u.hostname.replace(/^www\./, '');
+    const parts = u.pathname.split('/').filter(Boolean);
+
+    // youtu.be/VIDEOID
+    if (host === 'youtu.be' && parts[0] && /^[\w-]{11}/.test(parts[0])) {
+      return parts[0].substring(0, 11);
+    }
+    // youtube.com/watch?v=VIDEOID
+    const v = u.searchParams.get('v');
+    if (v && /^[\w-]{11}/.test(v)) return v.substring(0, 11);
+    // /embed/VIDEOID
+    const i = parts.indexOf('embed');
+    if (i >= 0 && parts[i + 1] && /^[\w-]{11}/.test(parts[i + 1])) {
+      return parts[i + 1].substring(0, 11);
+    }
+    // /shorts/VIDEOID
+    if (parts[0] === 'shorts' && parts[1] && /^[\w-]{11}/.test(parts[1])) {
+      return parts[1].substring(0, 11);
+    }
+  } catch {
+    // 生文字列から拾う
+  }
+  const m = input.match(/([a-zA-Z0-9_-]{11})/);
+  return m ? m[1] : null;
+}
+
 function TrendingBadge() {
   return (
     <div className="inline-flex items-center gap-1 rounded-full bg-violet-600/20 text-violet-300 px-2 py-0.5 text-[11px]">
@@ -108,13 +141,31 @@ export default async function VideoDetailPage({ params }: Params) {
     related = [...related, ...more];
   }
 
+  // ★追加: 正規化したIDを作る（platformVideoIdがURLでもOK）
+  const idOrUrl = v.platformVideoId || v.url || '';
+  const ytId = toYouTubeId(idOrUrl);
+
   return (
     <main className="mx-auto max-w-7xl px-4 py-6 grid grid-cols-1 lg:grid-cols-12 gap-6">
       {/* 左：プレイヤー＆メタ */}
       <article className="lg:col-span-8 space-y-4">
         <div className="aspect-video rounded-2xl overflow-hidden bg-black">
-          {v.platform === 'youtube' && v.platformVideoId ? (
-            <YouTubeLite id={v.platformVideoId} title={v.title ?? 'video'} />
+          {v.platform === 'youtube' ? (
+            ytId ? (
+              <YouTubeLite id={ytId} title={v.title ?? 'video'} />
+            ) : (
+              // IDが取れない場合のフォールバック
+              <div className="w-full h-full grid place-items-center bg-zinc-900 text-zinc-200">
+                <a
+                  href={v.url ?? '#'}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="rounded-lg bg-white text-black px-4 py-2 text-sm font-medium"
+                >
+                  YouTubeで開く ↗
+                </a>
+              </div>
+            )
           ) : (
             // YouTube以外のフォールバック（必要ならHLS/MP4）
             <iframe
