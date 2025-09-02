@@ -1,105 +1,123 @@
 // src/lib/youtube.ts
-const KEY = process.env.YOUTUBE_API_KEY ?? process.env.YT_API_KEY ?? "";
+const YT_API_KEY = process.env.YT_API_KEY!;
+const YT_BASE = "https://www.googleapis.com/youtube/v3";
 
-export type YtVideo = {
+type RawVideo = {
   id: string;
   title: string;
+  channelTitle?: string | null;
   url: string;
-  thumbnailUrl: string | null;
-  channelTitle: string;
-  publishedAt: Date;
-  durationSec: number | null;
-  views: number;
-  likes: number;
+  thumbnailUrl?: string | null;
+  publishedAt: string;    // ISO
+  durationSec?: number | null;
+  views?: number | null;
+  likes?: number | null;
 };
 
-const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
-
-export function iso8601ToSec(iso: string | undefined): number | null {
+function parseISODurationToSec(iso?: string | null): number | null {
   if (!iso) return null;
-  // PT#H#M#S → 秒
-  const m = iso.match(/PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?/);
+  // PTxHxMxS
+  const m = /^PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?$/i.exec(iso);
   if (!m) return null;
-  const [, h, min, s] = m;
-  return (parseInt(h || "0") * 3600) + (parseInt(min || "0") * 60) + (parseInt(s || "0"));
+  const h = parseInt(m[1] || "0", 10);
+  const min = parseInt(m[2] || "0", 10);
+  const s = parseInt(m[3] || "0", 10);
+  return h * 3600 + min * 60 + s;
 }
 
-export async function searchPages(opts: {
-  q: string;
-  maxPages?: number;          // 既定 80 (= 最大4000件)
-  publishedAfter?: string;    // ISO8601
-  delayMs?: number;           // 既定 120ms
+/**
+ * 直近公開動画を search→videos で解決して返す
+ */
+export async function fetchRecentYouTube(params: {
+  publishedAfterISO: string;     // 例: new Date(Date.now()-24h).toISOString()
+  maxPages?: number;             // ページ上限
+  maxItems?: number;             // 件数上限
+  regionCode?: string;           // 'JP' 推奨
+  query?: string;                // 任意キーワード
 }) {
-  if (!KEY) throw new Error("Missing YOUTUBE_API_KEY");
-  const { q, maxPages = 80, publishedAfter, delayMs = 120 } = opts;
+  if (!YT_API_KEY) throw new Error("YT_API_KEY is not set");
+  const {
+    publishedAfterISO,
+    maxPages = 10,
+    maxItems = 100,
+    regionCode = "JP",
+    query,
+  } = params;
 
-  const ids: string[] = [];
-  let pageToken = "";
-  for (let i = 0; i < maxPages; i++) {
-    const url = new URL("https://www.googleapis.com/youtube/v3/search");
-    url.searchParams.set("key", KEY);
-    url.searchParams.set("part", "snippet");
-    url.searchParams.set("type", "video");
-    url.searchParams.set("order", "date");
-    url.searchParams.set("maxResults", "50");
-    url.searchParams.set("q", q);
-    if (publishedAfter) url.searchParams.set("publishedAfter", publishedAfter);
-    if (pageToken) url.searchParams.set("pageToken", pageToken);
+  let pageToken: string | undefined;
+  const out: RawVideo[] = [];
+  let page = 0;
 
-    const r = await fetch(url.toString());
-    if (!r.ok) throw new Error(`YT search error ${r.status}`);
-    const json = await r.json();
-    for (const it of json.items ?? []) {
-      const vid = it?.id?.videoId;
-      if (vid) ids.push(vid);
+  while (page < maxPages && out.length < maxItems) {
+    page += 1;
+    const searchURL = new URL(`${YT_BASE}/search`);
+    searchURL.searchParams.set("key", YT_API_KEY);
+    searchURL.searchParams.set("part", "snippet");
+    searchURL.searchParams.set("type", "video");
+    searchURL.searchParams.set("order", "date"); // 新着順
+    searchURL.searchParams.set("publishedAfter", publishedAfterISO);
+    searchURL.searchParams.set("maxResults", "50");
+    searchURL.searchParams.set("regionCode", regionCode);
+    if (query) searchURL.searchParams.set("q", query);
+    if (pageToken) searchURL.searchParams.set("pageToken", pageToken);
+
+    const sres = await fetch(searchURL.toString());
+    if (!sres.ok) throw new Error(`YouTube search failed: ${sres.status}`);
+    const sjson = await sres.json();
+
+    const ids: string[] = (sjson.items || [])
+      .map((it: any) => it?.id?.videoId)
+      .filter(Boolean);
+
+    if (ids.length === 0) {
+      pageToken = sjson.nextPageToken;
+      if (!pageToken) break;
+      continue;
     }
-    pageToken = json.nextPageToken ?? "";
-    if (!pageToken) break;
-    await sleep(delayMs);
-  }
-  // 去重
-  return Array.from(new Set(ids));
-}
 
-export async function fetchDetails(ids: string[], delayMs = 120): Promise<YtVideo[]> {
-  if (!KEY) throw new Error("Missing YOUTUBE_API_KEY");
-  const out: YtVideo[] = [];
-  for (let i = 0; i < ids.length; i += 50) {
-    const chunk = ids.slice(i, i + 50);
-    const url = new URL("https://www.googleapis.com/youtube/v3/videos");
-    url.searchParams.set("key", KEY);
-    url.searchParams.set("part", "snippet,contentDetails,statistics");
-    url.searchParams.set("id", chunk.join(","));
+    const vidsURL = new URL(`${YT_BASE}/videos`);
+    vidsURL.searchParams.set("key", YT_API_KEY);
+    vidsURL.searchParams.set("part", "snippet,contentDetails,statistics");
+    vidsURL.searchParams.set("id", ids.join(","));
 
-    const r = await fetch(url.toString());
-    if (!r.ok) throw new Error(`YT videos error ${r.status}`);
-    const json = await r.json();
-    for (const it of json.items ?? []) {
-      const id = it.id as string;
-      const sn = it.snippet ?? {};
-      const st = it.statistics ?? {};
-      const cd = it.contentDetails ?? {};
-      const thumb =
-        sn?.thumbnails?.maxres?.url ??
-        sn?.thumbnails?.standard?.url ??
-        sn?.thumbnails?.high?.url ??
-        sn?.thumbnails?.medium?.url ??
-        sn?.thumbnails?.default?.url ??
-        null;
+    const vres = await fetch(vidsURL.toString());
+    if (!vres.ok) throw new Error(`YouTube videos failed: ${vres.status}`);
+    const vjson = await vres.json();
+
+    for (const v of vjson.items || []) {
+      const id = v.id;
+      const sn = v.snippet || {};
+      const st = v.statistics || {};
+      const cd = v.contentDetails || {};
 
       out.push({
         id,
-        title: sn.title ?? "",
+        title: sn.title,
+        channelTitle: sn.channelTitle ?? null,
         url: `https://www.youtube.com/watch?v=${id}`,
-        thumbnailUrl: thumb,
-        channelTitle: sn.channelTitle ?? "",
-        publishedAt: sn.publishedAt ? new Date(sn.publishedAt) : new Date(),
-        durationSec: iso8601ToSec(cd.duration),
-        views: Number(st.viewCount ?? 0),
-        likes: Number(st.likeCount ?? 0),
+        thumbnailUrl: sn.thumbnails?.medium?.url || sn.thumbnails?.default?.url || null,
+        publishedAt: sn.publishedAt,
+        durationSec: parseISODurationToSec(cd.duration),
+        views: st.viewCount != null ? Number(st.viewCount) : null,
+        likes: st.likeCount != null ? Number(st.likeCount) : null,
       });
     }
-    await sleep(delayMs);
+
+    pageToken = sjson.nextPageToken;
+    if (!pageToken) break;
   }
-  return out;
+
+  return { items: out.slice(0, maxItems) };
+}
+
+/** いわゆる“直近N時間”ぶんをまとめて取るヘルパ */
+export async function fetchRecentYouTubeSinceHours(hours = 24, opts?: { query?: string; regionCode?: string; limit?: number }) {
+  const since = new Date(Date.now() - hours * 3600_000).toISOString();
+  return fetchRecentYouTube({
+    publishedAfterISO: since,
+    maxPages: 10,
+    maxItems: opts?.limit ?? 200,
+    regionCode: opts?.regionCode ?? "JP",
+    query: opts?.query,
+  });
 }
