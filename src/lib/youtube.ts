@@ -105,4 +105,39 @@ export async function fetchDetails(videoIds: string[]): Promise<RawVideo[]> {
 
     for (const v of vjson.items || []) {
       const id = v.id;
-      const sn
+      const sn = v.snippet || {};
+      const st = v.statistics || {};
+      const cd = v.contentDetails || {};
+      out.push({
+        id,
+        title: sn.title,
+        channelTitle: sn.channelTitle ?? null,
+        url: `https://www.youtube.com/watch?v=${id}`,
+        thumbnailUrl:
+          sn.thumbnails?.medium?.url ||
+          sn.thumbnails?.default?.url ||
+          null,
+        publishedAt: sn.publishedAt,
+        durationSec: parseISODurationToSec(cd.duration),
+        views: st.viewCount != null ? Number(st.viewCount) : null,
+        likes: st.likeCount != null ? Number(st.likeCount) : null,
+      });
+    }
+  }
+  return out;
+}
+
+/** 直近N時間ぶんをまとめて取るヘルパ */
+export async function fetchRecentYouTubeSinceHours(
+  hours = 24,
+  opts?: { query?: string; regionCode?: string; limit?: number }
+) {
+  const since = new Date(Date.now() - hours * 3600_000).toISOString();
+  return fetchRecentYouTube({
+    publishedAfterISO: since,
+    maxPages: 10,
+    maxItems: opts?.limit ?? 200,
+    regionCode: opts?.regionCode ?? "JP",
+    query: opts?.query,
+  });
+}
