@@ -1,87 +1,98 @@
+// src/app/api/refresh/youtube/route.ts
 import { NextResponse } from "next/server";
-import { PrismaClient } from "@prisma/client";
-import { fetchDetails, type RawVideo } from "@/lib/youtube";
+import { PrismaClient, Prisma } from "@prisma/client";
+import { fetchRecentYouTube, type RawVideo } from "@/lib/youtube";
+
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
 
 const prisma = new PrismaClient();
 
-/**
- * /api/refresh/youtube?ids=aaa,bbb,ccc
- * - YouTube の詳細を取り直して Video テーブルを upsert
- * - 既存レコードは title/thumbnail/url/duration/channelTitle/views/likes/publishedAt を更新
- * - 作成時は必須の title / url を必ず補完して渡す
- */
+// URLからYouTubeのvideoIdをフォールバック抽出（もしidが無い場合の保険）
+function extractYouTubeIdFromUrl(url?: string | null): string | "" {
+  if (!url) return "";
+  try {
+    const u = new URL(url);
+    if (u.hostname.includes("youtube.com")) {
+      const v = u.searchParams.get("v");
+      return v ?? "";
+    }
+    if (u.hostname === "youtu.be") {
+      return u.pathname.replace("/", "");
+    }
+  } catch {
+    // noop
+  }
+  return "";
+}
+
 export async function GET(req: Request) {
   try {
     const { searchParams } = new URL(req.url);
-    const idsParam = searchParams.get("ids");
+    const hours = Number(searchParams.get("hours") ?? "24");
+    const limit = Number(searchParams.get("limit") ?? "100");
+    const query = searchParams.get("query") ?? undefined;
 
-    if (!idsParam) {
-      return NextResponse.json({ ok: false, error: "required: ids" }, { status: 400 });
-    }
+    // YouTubeから最近の動画候補を取得（RawVideo[]）
+    const list: RawVideo[] = await fetchRecentYouTube({ hours, limit, query });
 
-    const ids = idsParam
-      .split(",")
-      .map((s) => s.trim())
-      .filter(Boolean);
-
-    if (ids.length === 0) {
-      return NextResponse.json({ ok: false, error: "required: ids" }, { status: 400 });
-    }
-
-    // 取得
-    const videos: RawVideo[] = await fetchDetails(ids);
-
+    let fetched = list.length;
     let upserts = 0;
     let skippedNoId = 0;
-    let skippedNoPub = 0;
 
-    for (const it of videos) {
-      // RawVideo には platformVideoId は無い。contentDetails.videoId または id から導出する
-      const platform = "youtube";
-      const platformVideoId = it.contentDetails?.videoId ?? it.id ?? "";
+    for (const it of list) {
+      const platform = "youtube" as const;
+
+      // RawVideo は id を持つ前提。なければURLから抽出を試みる
+      const platformVideoId =
+        it.id || extractYouTubeIdFromUrl(it.url) || "";
 
       if (!platformVideoId) {
         skippedNoId++;
         continue;
       }
 
-      // 文字列は素のまま、日時は Date に正規化
-      const publishedAt = it.publishedAt ? new Date(it.publishedAt) : undefined;
-
-      // update 用は「あるものだけ」キー追加（undefined を渡さない）
-      const updateData: Record<string, any> = {};
-      if (it.title != null) updateData.title = it.title;
-      if (it.thumbnailUrl != null) updateData.thumbnailUrl = it.thumbnailUrl;
-      if (it.url != null) updateData.url = it.url;
-      if (it.durationSec != null) updateData.durationSec = it.durationSec;
-      if (it.channelTitle != null) updateData.channelTitle = it.channelTitle;
-      if (it.views != null) updateData.views = it.views;
-      if (it.likes != null) updateData.likes = it.likes;
-      if (publishedAt) updateData.publishedAt = publishedAt;
-
-      // create 用は必須フィールドを必ず与える（title / url）
-      // どちらか欠ける場合は安全なデフォルトを補完
+      // Prisma の create 側は undefined を許さないので、必須は安全なフォールバックを用意
       const safeTitle = it.title ?? `video ${platformVideoId}`;
       const safeUrl =
         it.url ?? `https://www.youtube.com/watch?v=${platformVideoId}`;
+      const safePublishedAt = new Date(
+        it.publishedAt ?? Date.now() // schemaが必須でも通るように現在時刻でフォールバック
+      );
 
-      const createData: Record<string, any> = {
+      // ---- create 用（必須フィールドは確実に埋める）----
+      const createData: Prisma.VideoUncheckedCreateInput = {
         platform,
         platformVideoId,
         title: safeTitle,
         url: safeUrl,
+        publishedAt: safePublishedAt,
       };
-      if (it.thumbnailUrl != null) createData.thumbnailUrl = it.thumbnailUrl;
-      if (it.durationSec != null) createData.durationSec = it.durationSec;
-      if (it.channelTitle != null) createData.channelTitle = it.channelTitle;
-      if (it.views != null) createData.views = it.views;
-      if (it.likes != null) createData.likes = it.likes;
-      if (publishedAt) createData.publishedAt = publishedAt;
+      // 任意項目は「あるときだけ」足す（undefinedを入れない）
+      if (it.thumbnailUrl) createData.thumbnailUrl = it.thumbnailUrl;
+      if (typeof it.durationSec === "number")
+        createData.durationSec = it.durationSec;
+      if (typeof it.views === "number") createData.views = it.views;
+      if (typeof it.likes === "number") createData.likes = it.likes;
+      if (it.channelTitle) createData.channelTitle = it.channelTitle;
+
+      // ---- update 用（変わり得る項目のみ）----
+      const updateData: Prisma.VideoUncheckedUpdateInput = {
+        title: safeTitle,
+        url: safeUrl,
+      };
+      if (it.thumbnailUrl) updateData.thumbnailUrl = it.thumbnailUrl;
+      if (typeof it.durationSec === "number")
+        updateData.durationSec = it.durationSec;
+      if (typeof it.views === "number") updateData.views = it.views;
+      if (typeof it.likes === "number") updateData.likes = it.likes;
+      if (it.channelTitle) updateData.channelTitle = it.channelTitle;
+      if (it.publishedAt) updateData.publishedAt = new Date(it.publishedAt);
 
       await prisma.video.upsert({
         where: { platform_platformVideoId: { platform, platformVideoId } },
-        create: createData, // ← create にはプリミティブ確定値のみ
-        update: updateData, // ← update は存在するキーだけ
+        create: createData,
+        update: updateData,
       });
 
       upserts++;
@@ -89,17 +100,16 @@ export async function GET(req: Request) {
 
     return NextResponse.json({
       ok: true,
-      requested: ids.length,
-      fetched: videos.length,
+      route: "refresh/youtube",
+      params: { hours, limit, query },
+      fetched,
       upserts,
       skippedNoId,
-      skippedNoPub, // いまは未使用だが将来用
     });
   } catch (err: any) {
-    const message =
-      (err && (err.message || err.toString())) || "unknown error";
+    console.error(err);
     return NextResponse.json(
-      { ok: false, error: message },
+      { ok: false, route: "refresh/youtube", error: String(err?.message ?? err) },
       { status: 500 }
     );
   }
