@@ -98,11 +98,12 @@ export async function GET(req: Request) {
         ...(pub ? { publishedAt: pub } : {}),
       };
 
-      // create 用（Prisma.VideoCreateInput）: 必須2項目を確定 + 任意項目はプリミティブだけを個別に条件付与
+      // create 用（Prisma.VideoCreateInput）
+      // ⚠ title が schema 上で必須なので、必ず文字列を入れる（なければフォールバック）
       const createData: Prisma.VideoCreateInput = {
         platform,
         platformVideoId,
-        ...(it.title ? { title: it.title } : {}),
+        title: it.title ?? `video ${platformVideoId}`, // ★ここが重要（必須を担保）
         ...(it.url ? { url: it.url } : {}),
         ...(it.thumbnailUrl ? { thumbnailUrl: it.thumbnailUrl } : {}),
         ...(typeof it.durationSec === "number" ? { durationSec: it.durationSec } : {}),
