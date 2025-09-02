@@ -1,15 +1,20 @@
+// src/components/YouTubeLite.tsx
 'use client';
 
-import { useEffect, useMemo, useState } from 'react';
-import { usePathname } from 'next/navigation';
-import { toYouTubeId } from '@/utils/youtube';
+import { useMemo, useState } from 'react';
 
 type Props = {
-  /** URLでもIDでもOK（shortsやwatch URL対応） */
+  /** ID でも URL でもOK（/watch?v=.. や /shorts/.. も可） */
   idOrUrl: string;
   title?: string;
   poster?: 'hqdefault' | 'mqdefault' | 'sddefault' | 'maxresdefault';
   noCookie?: boolean;
+
+  /** 縦動画と分かっている場合に指定（未指定なら URL に /shorts/ を含むかで推定） */
+  isVertical?: boolean;
+
+  /** プレイヤー直下に「YouTubeで開く」を出すか（モバイルの邪魔回避のため既定 false） */
+  showOpenExternal?: boolean;
 };
 
 export default function YouTubeLite({
@@ -17,26 +22,30 @@ export default function YouTubeLite({
   title = 'YouTube video',
   poster = 'hqdefault',
   noCookie = true,
+  isVertical,
+  showOpenExternal = false,
 }: Props) {
-  const pathname = usePathname();
   const [loaded, setLoaded] = useState(false);
-  const [origin, setOrigin] = useState<string>('');
-  useEffect(() => setOrigin(window.location.origin), []);
 
-  const id = useMemo(() => toYouTubeId(idOrUrl), [idOrUrl]);
+  const { id, verticalGuess } = useMemo(() => {
+    const id = toYouTubeId(idOrUrl);
+    const verticalGuess =
+      typeof isVertical === 'boolean'
+        ? isVertical
+        : /(^|\/)shorts(\/|$)/.test(idOrUrl);
+    return { id, verticalGuess };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [idOrUrl, isVertical]);
 
-  // 埋め込み不可/ID解決不可 → 直接YouTubeへ
+  // IDが取れない場合はフォールバック（オーバーレイではなく枠内に静的表示）
   if (!id) {
-    const watchUrl = toWatchUrl(idOrUrl);
+    const watch = toWatchUrl(idOrUrl);
     return (
-      <div
-        key={`${pathname}-invalid`}
-        className="relative w-full max-w-[960px] aspect-video rounded-xl grid place-items-center bg-zinc-900 text-zinc-200"
-      >
+      <div className="w-full aspect-video grid place-items-center rounded-xl bg-zinc-900 text-zinc-100">
         <div className="text-center px-6">
-          <p className="mb-3 font-semibold">この動画を埋め込み再生できません。</p>
+          <p className="mb-3 font-semibold">この動画は埋め込み再生できません。</p>
           <a
-            href={watchUrl}
+            href={watch}
             target="_blank"
             rel="noreferrer"
             className="inline-flex items-center gap-2 rounded-lg bg-white text-black px-4 py-2 text-sm font-medium"
@@ -52,40 +61,42 @@ export default function YouTubeLite({
     ? 'https://www.youtube-nocookie.com'
     : 'https://www.youtube.com';
   const thumb = `https://i.ytimg.com/vi/${id}/${poster}.jpg`;
-  const embed =
-    `${base}/embed/${id}?autoplay=1&playsinline=1&rel=0&modestbranding=1` +
-    (origin ? `&origin=${encodeURIComponent(origin)}` : '');
+  const embed = `${base}/embed/${id}?autoplay=1&playsinline=1&rel=0&modestbranding=1`;
+
+  // モバイルで縦なら 9:16 の比率にする（上部ナビのパディングがある分、実質ほぼ全画面）
+  const isVerticalFinal = verticalGuess === true;
+  const wrapperClass = isVerticalFinal
+    ? // モバイル既定=縦比率、sm以上=従来の16:9
+      'relative w-full overflow-hidden rounded-xl bg-black aspect-[9/16] sm:aspect-video'
+    : 'relative w-full overflow-hidden rounded-xl bg-black aspect-video';
 
   return (
-    <div
-      key={`${pathname}-${id}`}
-      className="relative w-full max-w-[960px] aspect-video overflow-hidden rounded-xl bg-black"
-    >
-      {!loaded ? (
-        <button
-          type="button"
-          aria-label="Play video"
-          onClick={() => setLoaded(true)} // クリック＝確実なユーザー操作
-          className="group absolute inset-0 cursor-pointer"
-        >
-          {/* eslint-disable-next-line @next/next/no-img-element */}
-          <img
-            src={thumb}
-            alt={title}
-            className="h-full w-full object-cover"
-            loading="lazy"
-            referrerPolicy="no-referrer-when-downgrade"
-          />
-          <span
-            className="absolute inset-0 m-auto h-16 w-16 rounded-full bg-white/80 group-hover:bg-white/95 shadow
-                       flex items-center justify-center text-black text-2xl"
-            style={{ pointerEvents: 'none' }}
+    <>
+      <div className={wrapperClass}>
+        {!loaded ? (
+          <button
+            type="button"
+            aria-label="Play video"
+            onClick={() => setLoaded(true)}
+            className="group absolute inset-0 cursor-pointer"
           >
-            ▶
-          </span>
-        </button>
-      ) : (
-        <>
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            <img
+              src={thumb}
+              alt={title}
+              className="h-full w-full object-cover"
+              loading="lazy"
+              referrerPolicy="no-referrer-when-downgrade"
+            />
+            <span
+              className="absolute inset-0 m-auto h-16 w-16 rounded-full bg-white/80 group-hover:bg-white/95 shadow
+                         flex items-center justify-center text-black text-2xl"
+              style={{ pointerEvents: 'none' }}
+            >
+              ▶
+            </span>
+          </button>
+        ) : (
           <iframe
             title={title}
             src={embed}
@@ -95,19 +106,54 @@ export default function YouTubeLite({
             className="absolute inset-0 h-full w-full border-0"
             referrerPolicy="strict-origin-when-cross-origin"
           />
-          {/* 埋め込み禁止・地域制限などの保険として常にフォールバックボタンも表示 */}
+        )}
+      </div>
+
+      {showOpenExternal && (
+        <div className="mt-2 text-xs">
           <a
             href={`https://www.youtube.com/watch?v=${id}`}
             target="_blank"
             rel="noreferrer"
-            className="absolute right-2 bottom-2 rounded bg-white/90 text-black px-2 py-1 text-xs font-medium hover:bg-white"
+            className="text-zinc-400 underline hover:text-zinc-200"
           >
             再生できない？YouTubeで開く ↗
           </a>
-        </>
+        </div>
       )}
-    </div>
+    </>
   );
+}
+
+/* ---------------- utils ---------------- */
+
+function toYouTubeId(input?: string | null): string | null {
+  if (!input) return null;
+  if (/^[a-zA-Z0-9_-]{11}$/.test(input)) return input;
+
+  try {
+    const u = new URL(input);
+    const host = u.hostname.replace(/^www\./, '');
+    const parts = u.pathname.split('/').filter(Boolean);
+
+    if (host === 'youtu.be' && parts[0] && /^[\w-]{11}/.test(parts[0])) {
+      return parts[0].substring(0, 11);
+    }
+    const v = u.searchParams.get('v');
+    if (v && /^[\w-]{11}/.test(v)) return v.substring(0, 11);
+
+    const i = parts.indexOf('embed');
+    if (i >= 0 && parts[i + 1] && /^[\w-]{11}/.test(parts[i + 1])) {
+      return parts[i + 1].substring(0, 11);
+    }
+    if (parts[0] === 'shorts' && parts[1] && /^[\w-]{11}/.test(parts[1])) {
+      return parts[1].substring(0, 11);
+    }
+  } catch {
+    /* noop */
+  }
+  const m = input.match(/([a-zA-Z0-9_-]{11})/);
+  return m ? m[1] : null;
 }
 
 function toWatchUrl(idOrUrl: string) {
