@@ -8,10 +8,11 @@ export const revalidate = 0;
 const prisma = new PrismaClient();
 
 type Range = "24h" | "7d" | "30d";
+type Basis = "published" | "ingested" | "auto";
 const hoursOf = (r: Range) => (r === "7d" ? 7 * 24 : r === "30d" ? 30 * 24 : 24);
 
-// 補完の上限（空を避けるため最大72hまで広げる）
-const FALLBACK_STEPS_HOURS = [0, 24, 48]; // 0=そのまま, 次に+24h(=48h窓), 次に+48h(=72h窓)
+// 空画面回避のため最大72hまで広げる（24h→48h→72h）
+const FALLBACK_STEPS_HOURS = [0, 24, 48];
 
 export async function GET(req: Request) {
   const url = new URL(req.url);
@@ -21,6 +22,9 @@ export async function GET(req: Request) {
   const range: Range = (["24h", "7d", "30d"] as const).includes(rangeParam as any)
     ? (rangeParam as Range)
     : "24h";
+
+  // basis=published|ingested|auto（既定 auto）
+  const basisParam = (url.searchParams.get("basis") || "auto").toLowerCase() as Basis;
 
   // shorts=exclude でも excludeShorts=1/true でもOK
   const shortsParam = (url.searchParams.get("shorts") || "").toLowerCase();
@@ -39,11 +43,17 @@ export async function GET(req: Request) {
   const baseHours = hoursOf(range);
   const baseSince = new Date(now - baseHours * 3600_000);
 
-  // --- WHERE ビルダー（sinceと除外条件を注入） ---
-  const buildWhere = (since: Date) => {
+  // 動的フィールド（publishedAt or createdAt）
+  const timeFieldFor = (basis: Exclude<Basis, "auto">) =>
+    basis === "ingested" ? ("createdAt" as const) : ("publishedAt" as const);
+
+  // where ビルダー（basis/timeField と since を注入）
+  const buildWhere = (basis: Exclude<Basis, "auto">, since: Date) => {
+    const timeField = timeFieldFor(basis);
+    // Prisma の型を避けるため any で動的キー
     const baseWhere: any = {
       platform: "youtube",
-      publishedAt: { gte: since },
+      [timeField]: { gte: since },
     };
     const excludeShortsWhere = excludeShorts
       ? {
@@ -60,20 +70,43 @@ export async function GET(req: Request) {
     return { AND: [baseWhere, excludeShortsWhere] };
   };
 
-  // --- 24h 基準の件数（診断用に必ず計測） ---
-  const counts24h = {
-    baseAllPlatforms: await prisma.video.count({ where: { publishedAt: { gte: baseSince } } }),
-    baseYouTube: await prisma.video.count({ where: { publishedAt: { gte: baseSince }, platform: "youtube" as any } }),
-  };
+  // 24h の件数（basisごと）を必ず計測しておく
+  // - published: 公開基準
+  // - ingested: 入荷基準（createdAt）。schemaに createdAt が無い場合は追加を検討
+  const count24hPublished = await prisma.video.count({
+    where: { platform: "youtube" as any, publishedAt: { gte: baseSince } },
+  });
 
-  // --- フォールバック窓の決定（noFallback のときは 24h 固定）---
+  let count24hIngested = 0;
+  try {
+    // createdAt が無い環境でもビルドは通るよう any で回避
+    count24hIngested = await prisma.video.count({
+      where: { platform: "youtube" as any, ...( { createdAt: { gte: baseSince } } as any) },
+    });
+  } catch {
+    // createdAt が無い場合は 0 のまま（デバッグで気づけるようにする）
+    count24hIngested = 0;
+  }
+
+  // basis を決定（auto のときは published→ingested の順で使える方を選ぶ）
+  let effectiveBasis: Exclude<Basis, "auto"> =
+    basisParam === "published" || basisParam === "ingested"
+      ? basisParam
+      : count24hPublished > 0
+      ? "published"
+      : count24hIngested > 0
+      ? "ingested"
+      : "published"; // どちらも0なら published を基準にしつつ後で時間窓を広げる
+
+  // フォールバック窓（0=そのまま, +24h, +48h）
   let effectiveSince = baseSince;
   let effectiveHours = baseHours;
 
+  // noFallback のときは窓を広げない
   if (!noFallback) {
     for (const step of FALLBACK_STEPS_HOURS) {
       const trySince = new Date(baseSince.getTime() - step * 3600_000);
-      const c = await prisma.video.count({ where: buildWhere(trySince) });
+      const c = await prisma.video.count({ where: buildWhere(effectiveBasis, trySince) });
       if (c > 0) {
         effectiveSince = trySince;
         effectiveHours = baseHours + step;
@@ -82,10 +115,10 @@ export async function GET(req: Request) {
     }
   }
 
-  const where = buildWhere(effectiveSince);
+  const where = buildWhere(effectiveBasis, effectiveSince);
 
   // =========================
-  // Debug: 24h と 実効窓 の両方を返す
+  // Debug: 24h と 実効窓/基準 の両方を返す
   // =========================
   if (debug) {
     // DB/サーバ時刻
@@ -97,11 +130,11 @@ export async function GET(req: Request) {
       dbNowISO = new Date().toISOString();
     }
 
-    // ショート要素（24h基準で）
+    // 24h 基準でのショート要素（published）
     const shortByDur24h = await prisma.video.count({
       where: {
         AND: [
-          { publishedAt: { gte: baseSince } },
+          { platform: "youtube" as any, publishedAt: { gte: baseSince } },
           { AND: [{ durationSec: { gt: 0 } }, { durationSec: { lte: 60 } }] },
         ],
       },
@@ -109,18 +142,20 @@ export async function GET(req: Request) {
     const shortByUrl24h = await prisma.video.count({
       where: {
         AND: [
-          { publishedAt: { gte: baseSince } },
+          { platform: "youtube" as any, publishedAt: { gte: baseSince } },
           { OR: [{ url: { contains: "/shorts/" } }, { platformVideoId: { contains: "/shorts/" } }] },
         ],
       },
     });
     const durNull24h = await prisma.video.count({
       where: {
-        AND: [{ publishedAt: { gte: baseSince } }, { OR: [{ durationSec: null }, { durationSec: 0 }] }],
+        AND: [
+          { platform: "youtube" as any, publishedAt: { gte: baseSince } },
+          { OR: [{ durationSec: null }, { durationSec: 0 }] },
+        ],
       },
     });
 
-    // 実効 where での件数
     const afterShortsEffective = await prisma.video.count({ where });
 
     // プラットフォーム分布（全体）
@@ -143,8 +178,8 @@ export async function GET(req: Request) {
 
     // 実効条件のサンプル
     const sample = await prisma.video.findMany({
-      where, orderBy: [{ publishedAt: "desc" }], take: 3,
-      select: { id: true, title: true, publishedAt: true, durationSec: true, url: true, platformVideoId: true, views: true, likes: true },
+      where, orderBy: [{ [effectiveBasis === "ingested" ? "createdAt" : "publishedAt"]: "desc" } as any], take: 3,
+      select: { id: true, title: true, publishedAt: true, durationSec: true, url: true, platformVideoId: true, views: true, likes: true, ...(effectiveBasis === "ingested" ? { createdAt: true } : {}) } as any,
     });
 
     return NextResponse.json(
@@ -152,11 +187,13 @@ export async function GET(req: Request) {
         ok: true,
         window: { range, since: baseSince.toISOString() },
         counts24h: {
-          ...counts24h,
+          published: count24hPublished,
+          ingested: count24hIngested,
           shortByDur: shortByDur24h,
           shortByUrl: shortByUrl24h,
           durNull: durNull24h,
         },
+        effectiveBasis,
         effectiveWindow: {
           since: effectiveSince.toISOString(),
           hours: effectiveHours,
@@ -178,7 +215,7 @@ export async function GET(req: Request) {
   }
 
   // =========================
-  // 通常レスポンス（空を避けるフォールバック適用済み）
+  // 通常レスポンス（基準と窓のフォールバック適用済み）
   // =========================
   const rows = await prisma.video.findMany({
     where,
@@ -193,6 +230,7 @@ export async function GET(req: Request) {
       thumbnailUrl: true,
       durationSec: true,
       publishedAt: true,
+      // createdAt は schema にある場合は自動で返ります（必要なら select に追加）
       channelTitle: true,
       views: true,
       likes: true,
@@ -211,12 +249,13 @@ export async function GET(req: Request) {
       take,
       total,
       window: { range, since: baseSince.toISOString() },
+      effectiveBasis,
       effectiveWindow: {
         since: effectiveSince.toISOString(),
         hours: effectiveHours,
         widened: effectiveHours !== baseHours,
       },
-      params: { excludeShorts, noFallback },
+      params: { excludeShorts, noFallback, basis: basisParam },
       version: { commit: process.env.VERCEL_GIT_COMMIT_SHA?.slice(0, 7) || "local" },
     },
     { headers: { "Cache-Control": "no-store, no-cache, max-age=0" } }
