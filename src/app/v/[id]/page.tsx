@@ -4,6 +4,7 @@ import { notFound } from 'next/navigation';
 import Link from 'next/link';
 import ClientBits from './ClientBits';
 import YouTubeShortPlayer from '@/components/YouTubeShortPlayer';
+import HistoryMarker from '@/components/HistoryMarker';
 
 export const dynamic = 'force-dynamic'; // 常に最新を取得
 
@@ -60,7 +61,7 @@ function toYouTubeId(input?: string | null): string | null {
       return parts[1].substring(0, 11);
     }
   } catch {
-    /* noop: 生文字列から拾う */
+    /* noop */
   }
   const m = input.match(/([a-zA-Z0-9_-]{11})/);
   return m ? m[1] : null;
@@ -157,7 +158,6 @@ export default async function VideoDetailPage({ params }: Params) {
     <main className="mx-auto max-w-7xl px-4 py-6 grid grid-cols-1 lg:grid-cols-12 gap-6">
       {/* 左：プレイヤー＆メタ */}
       <article className="lg:col-span-8 space-y-4">
-        {/* 外側の aspect は付けず、比率はプレイヤー側で制御 */}
         <div className="rounded-2xl overflow-hidden bg-black">
           {v.platform?.toLowerCase() === 'youtube' ? (
             ytId ? (
@@ -202,8 +202,19 @@ export default async function VideoDetailPage({ params }: Params) {
           <span className="text-zinc-400">👁 {fmt(v.views)}</span>
           <span className="text-zinc-400">❤️ {fmt(v.likes)}</span>
 
-          {/* 右寄せ：お気に入り / 共有（クライアント） */}
           <span className="ml-auto" />
+          {/* YouTubeで開く導線（常設） */}
+          {v.url && (
+            <a
+              href={v.url}
+              target="_blank"
+              rel="noreferrer"
+              className="rounded bg-white text-black px-3 py-1.5 text-sm font-medium"
+            >
+              YouTubeで開く ↗
+            </a>
+          )}
+          {/* お気に入り/共有など既存のクライアント要素 */}
           <ClientBits videoId={v.id} />
         </div>
 
@@ -227,6 +238,9 @@ export default async function VideoDetailPage({ params }: Params) {
             通報・フィードバック
           </Link>
         </div>
+
+        {/* “続きから” 用の履歴保存 */}
+        <HistoryMarker videoId={v.id} title={v.title} />
       </article>
 
       {/* 右：関連 */}
