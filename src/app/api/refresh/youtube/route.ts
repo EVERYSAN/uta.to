@@ -1,168 +1,123 @@
 // src/app/api/refresh/youtube/route.ts
-import { NextRequest, NextResponse } from "next/server";
-import { PrismaClient, Prisma } from "@prisma/client";
+import { NextResponse } from "next/server";
+import { Prisma, type Video } from "@prisma/client";
+import { prisma } from "@/lib/prisma"; // ← ルート内で new せず、lib から import
+import { fetchDetails } from "@/lib/youtube";
 
-// ※ Vercel環境だと複数インスタンス化を避けるためのガード
-const globalForPrisma = global as unknown as { prisma?: PrismaClient };
-export const prisma =
-  globalForPrisma.prisma ?? new PrismaClient({ log: ["error", "warn"] });
-if (process.env.NODE_ENV !== "production") globalForPrisma.prisma = prisma;
+// これらの export は Next.js で許可されている
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
+export const preferredRegion = "sin1";
 
-const YT_API_KEY = process.env.YT_API_KEY; // ← env 名は YT_API_KEY で統一
-
-type YtItem = {
-  id: string;
-  snippet?: {
-    title?: string;
-    channelTitle?: string;
-    publishedAt?: string;
-    thumbnails?: {
-      default?: { url?: string };
-      medium?: { url?: string };
-      high?: { url?: string };
-      maxres?: { url?: string };
-    };
-  };
-  contentDetails?: {
-    duration?: string; // ISO8601 PT#H#M#S
-  };
-  statistics?: {
-    viewCount?: string;
-    likeCount?: string;
-  };
-};
-
-function parseISODurationToSec(iso?: string): number | undefined {
-  if (!iso) return undefined;
-  // 例: PT1H2M3S, PT4M10S, PT55S, PT2H
-  const m = iso.match(
-    /P(?:(\d+)D)?T(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?/i
-  );
-  if (!m) return undefined;
-  const [, d, h, min, s] = m.map((v) => (v ? parseInt(v, 10) : 0));
-  return (d || 0) * 86400 + (h || 0) * 3600 + (min || 0) * 60 + (s || 0);
+function parseIdsFromURL(url: string): string[] {
+  const sp = new URL(url).searchParams;
+  const idsRaw = sp.get("ids");
+  if (!idsRaw) return [];
+  return idsRaw
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean)
+    .slice(0, 50); // 念のため上限
 }
 
-function pickThumb(s?: YtItem["snippet"]) {
+function safeThumb(v: any): string | undefined {
+  const sn = v?.snippet;
+  const t = sn?.thumbnails;
   return (
-    s?.thumbnails?.maxres?.url ||
-    s?.thumbnails?.high?.url ||
-    s?.thumbnails?.medium?.url ||
-    s?.thumbnails?.default?.url
+    v?.thumbnailUrl ||
+    t?.maxres?.url ||
+    t?.standard?.url ||
+    t?.high?.url ||
+    t?.medium?.url ||
+    t?.default?.url ||
+    undefined
   );
 }
 
-async function fetchYoutubeDetails(ids: string[]): Promise<YtItem[]> {
-  if (!YT_API_KEY) {
-    throw new Error("YT_API_KEY is not set");
-  }
-  const url = new URL("https://www.googleapis.com/youtube/v3/videos");
-  url.searchParams.set("part", "snippet,contentDetails,statistics");
-  url.searchParams.set("id", ids.join(","));
-  url.searchParams.set("key", YT_API_KEY);
-
-  const res = await fetch(url.toString(), { next: { revalidate: 0 } });
-  if (!res.ok) {
-    const text = await res.text().catch(() => "");
-    throw new Error(`YouTube API error: ${res.status} ${text}`);
-  }
-  const json = await res.json();
-  return Array.isArray(json?.items) ? (json.items as YtItem[]) : [];
-}
-
-export async function GET(req: NextRequest) {
+export async function GET(req: Request) {
   try {
-    const search = req.nextUrl.searchParams;
-    const idsParam = search.get("ids");
-    if (!idsParam) {
+    const ids = parseIdsFromURL(req.url);
+    if (ids.length === 0) {
       return NextResponse.json({ ok: false, error: "required: ids" }, { status: 400 });
     }
 
-    const ids = idsParam
-      .split(",")
-      .map((s) => s.trim())
-      .filter(Boolean);
-
-    if (ids.length === 0) {
-      return NextResponse.json({ ok: false, error: "ids: empty" }, { status: 400 });
-    }
-
-    // YouTube 詳細取得
-    const items = await fetchYoutubeDetails(ids);
+    // YouTube 詳細を取得
+    const items = await fetchDetails(ids);
 
     let upserts = 0;
+    const results: Pick<Video, "id" | "platform" | "platformVideoId">[] = [];
+
     for (const it of items) {
-      const platform = "youtube" as const;
-      const platformVideoId = it.id;
+      const platform = "youtube";
+      const platformVideoId =
+        it.platformVideoId ?? it.id ?? it.contentDetails?.videoId ?? "";
 
-      // 必須は安全に文字列へ
-      const safeTitle =
-        (it.snippet?.title ?? "").trim() || `video ${platformVideoId}`;
-      const safeUrl = `https://www.youtube.com/watch?v=${platformVideoId}`;
-      const safeThumb =
-        pickThumb(it.snippet) ||
-        `https://i.ytimg.com/vi/${platformVideoId}/hqdefault.jpg`;
+      if (!platformVideoId) continue;
 
-      // 任意項目は「ある時だけ」入れる
-      const pubAt = it.snippet?.publishedAt
-        ? new Date(it.snippet.publishedAt)
-        : undefined;
-      const durationSec = parseISODurationToSec(it.contentDetails?.duration);
-      const channelTitle = it.snippet?.channelTitle?.trim() || undefined;
+      const title = (it.title ?? it.snippet?.title ?? "").trim();
+      const safeTitle = title || `video ${platformVideoId}`;
+
+      const url = it.url ?? `https://www.youtube.com/watch?v=${platformVideoId}`;
+      const thumbnailUrl = safeThumb(it);
+      const channelTitle = it.channelTitle ?? it.snippet?.channelTitle ?? "";
+
+      // publishedAt は必須。なければ now を入れて型を満たす
+      const pubInput = it.publishedAt ?? it.snippet?.publishedAt ?? null;
+      const publishedAt: Date = pubInput ? new Date(pubInput) : new Date();
+
+      // 任意（schema では optional）
+      const durationSec =
+        typeof it.durationSec === "number" ? it.durationSec : undefined;
       const views =
-        it.statistics?.viewCount != null
-          ? Number(it.statistics.viewCount)
-          : undefined;
+        typeof it.views === "number" ? it.views : undefined;
       const likes =
-        it.statistics?.likeCount != null
-          ? Number(it.statistics.likeCount)
-          : undefined;
+        typeof it.likes === "number" ? it.likes : undefined;
 
-      // Update 用：存在すれば更新。Prisma.VideoUpdateInput はプリミティブでOK
-      const updateData: Prisma.VideoUpdateInput = {
-        title: safeTitle,
-        url: safeUrl,
-        thumbnailUrl: safeThumb,
-        ...(pubAt ? { publishedAt: pubAt } : {}),
-        ...(durationSec != null ? { durationSec } : {}),
-        ...(channelTitle ? { channelTitle } : {}),
-        ...(views != null ? { views } : {}),
-        ...(likes != null ? { likes } : {}),
-      };
-
-      // Create 用：必須フィールドは **必ず** 与える。任意項目は defined の時だけ追加。
-      // ここで UpdateInput を流用しないのがポイント（型衝突を避ける）
+      // ★ create は Prisma.VideoCreateInput を“必須フィールドを確実に”満たす形で明示的に構築
       const createData: Prisma.VideoCreateInput = {
         platform,
         platformVideoId,
-        title: safeTitle,
-        url: safeUrl,
-        thumbnailUrl: safeThumb,
-        ...(pubAt ? { publishedAt: pubAt } : {}),
-        ...(durationSec != null ? { durationSec } : {}),
-        ...(channelTitle ? { channelTitle } : {}),
-        ...(views != null ? { views } : {}),
-        ...(likes != null ? { likes } : {}),
+        title: safeTitle,         // required
+        url,                      // required
+        publishedAt,              // required
+        // optional
+        thumbnailUrl,
+        durationSec,
+        channelTitle,             // schemaで@default("")なので未指定でも良いが、入れておく
+        views,
+        likes,
+        rawJson: it as any,
       };
 
-      await prisma.video.upsert({
+      // ★ update は Prisma.VideoUpdateInput で OK（全て optional 扱い）
+      const updateData: Prisma.VideoUpdateInput = {
+        title: safeTitle,
+        url,
+        publishedAt, // まれに変わる可能性があるため上書き許容
+        thumbnailUrl,
+        durationSec,
+        channelTitle,
+        views,
+        likes,
+        rawJson: it as any,
+      };
+
+      const row = await prisma.video.upsert({
         where: { platform_platformVideoId: { platform, platformVideoId } },
         create: createData,
         update: updateData,
+        select: { id: true, platform: true, platformVideoId: true },
       });
 
-      upserts += 1;
+      results.push(row);
+      upserts++;
     }
 
-    return NextResponse.json({
-      ok: true,
-      requested: ids.length,
-      fetched: items.length,
-      upserts,
-    });
+    return NextResponse.json({ ok: true, requested: ids.length, fetched: items.length, upserts, results });
   } catch (err: any) {
+    // 型安全に NextResponse を返す
     return NextResponse.json(
-      { ok: false, error: String(err?.message ?? err) },
+      { ok: false, error: err?.message ?? "unknown error" },
       { status: 500 }
     );
   }
