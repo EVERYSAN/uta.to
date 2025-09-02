@@ -76,5 +76,16 @@ model VideoMetric {
 }
 
 
+model SupportEvent {
+  id        String   @id @default(cuid())
+  videoId   String
+  video     Video    @relation(fields: [videoId], references: [id], onDelete: Cascade)
+  amount    Int      @default(1)
+  ua        String?
+  ipHash    String?
+  createdAt DateTime @default(now())
+
+  @@index([videoId, createdAt])
+}
 
 
