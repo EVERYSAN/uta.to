@@ -1,71 +1,70 @@
-// src/app/v/[id]/ClientBits.tsx
 "use client";
 
 import { useEffect, useState } from "react";
 
-export default function ClientActions({ videoId }: { videoId: string }) {
-  return (
-    <div className="flex items-center gap-2">
-      <FavButton videoId={videoId} />
-      <ShareButton />
-    </div>
-  );
-}
+type Props = { videoId: string };
 
-function FavButton({ videoId }: { videoId: string }) {
-  const key = "fav:v1";
-  const [on, setOn] = useState(false);
+export default function ClientBits({ videoId }: Props) {
+  const [fav, setFav] = useState(false);
+  const shareUrl =
+    typeof window !== "undefined"
+      ? `${window.location.origin}/v/${videoId}`
+      : "";
 
+  // 初期化：localStorage から読み込み
   useEffect(() => {
     try {
-      const raw = localStorage.getItem(key);
-      const arr: string[] = raw ? JSON.parse(raw) : [];
-      setOn(arr.includes(videoId));
+      const raw = localStorage.getItem("favVideos");
+      const set = new Set<string>(raw ? JSON.parse(raw) : []);
+      setFav(set.has(videoId));
     } catch {}
   }, [videoId]);
 
-  const toggle = () => {
+  const toggleFav = () => {
     try {
-      const raw = localStorage.getItem(key);
+      const raw = localStorage.getItem("favVideos");
       const arr: string[] = raw ? JSON.parse(raw) : [];
-      const i = arr.indexOf(videoId);
-      if (i >= 0) arr.splice(i, 1);
-      else arr.unshift(videoId);
-      localStorage.setItem(key, JSON.stringify(arr.slice(0, 200)));
-      setOn(!on);
+      const set = new Set(arr);
+      if (set.has(videoId)) set.delete(videoId);
+      else set.add(videoId);
+      localStorage.setItem("favVideos", JSON.stringify([...set]));
+      setFav(set.has(videoId));
     } catch {}
   };
 
-  return (
-    <button
-      onClick={toggle}
-      className={`px-3 py-1.5 rounded-full text-sm ${
-        on ? "bg-violet-600 text-white" : "bg-zinc-700 text-white hover:bg-zinc-600"
-      }`}
-      aria-pressed={on}
-    >
-      {on ? "お気に入り済み" : "お気に入り"}
-    </button>
-  );
-}
-
-function ShareButton() {
-  const [copied, setCopied] = useState(false);
-
-  const copy = async () => {
+  const doShare = async () => {
     try {
-      await navigator.clipboard.writeText(window.location.href);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 1200);
+      // Web Share API があれば
+      if (navigator.share) {
+        await navigator.share({ url: shareUrl });
+        return;
+      }
+      // なければクリップボードへ
+      await navigator.clipboard.writeText(shareUrl);
+      alert("リンクをコピーしました");
     } catch {}
   };
 
   return (
-    <button
-      onClick={copy}
-      className="px-3 py-1.5 rounded-full text-sm bg-zinc-700 text-white hover:bg-zinc-600"
-    >
-      {copied ? "コピーしました" : "共有リンク"}
-    </button>
+    <div className="flex items-center gap-2">
+      <button
+        onClick={toggleFav}
+        className={`rounded-full px-3 py-1 text-xs font-medium transition-colors ${
+          fav
+            ? "bg-violet-600 text-white"
+            : "bg-zinc-800 text-zinc-200 hover:bg-zinc-700"
+        }`}
+        aria-pressed={fav}
+      >
+        {fav ? "★ お気に入り" : "☆ お気に入り"}
+      </button>
+
+      <button
+        onClick={doShare}
+        className="rounded-full px-3 py-1 text-xs font-medium bg-zinc-800 text-zinc-200 hover:bg-zinc-700 transition-colors"
+      >
+        共有
+      </button>
+    </div>
   );
 }
