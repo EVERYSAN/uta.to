@@ -1,33 +1,46 @@
-// app/api/cron/daily/route.ts
-export const dynamic = 'force-dynamic'; // ルートのキャッシュ無効化
+// src/app/api/cron/daily/route.ts
+export const dynamic = "force-dynamic";
 
-function okFromVercelCron(req: Request) {
-  const ua = req.headers.get('user-agent') || '';
-  const hv = req.headers.get('x-vercel-cron');
-  // Vercel Cron の手動 Run/定期実行で付くヘッダやUAを許可
-  return hv !== null || /Vercel-Cron/i.test(ua);
-}
+import { PrismaClient } from "@prisma/client";
+const prisma = new PrismaClient();
 
-function okFromSecret(req: Request) {
-  const url = new URL(req.url);
-  const bearer =
-    req.headers.get('authorization')?.replace(/^Bearer\s+/i, '') ?? '';
-  const q = url.searchParams.get('secret') || url.searchParams.get('token');
-  const need = process.env.CRON_SECRET;
-  if (!need) return false;
-  return bearer === need || q === need;
+function authorized(req: Request) {
+  const u = new URL(req.url);
+  const s = process.env.CRON_SECRET ?? "";
+  const ua = req.headers.get("user-agent") || "";
+  return (
+    req.headers.get("x-vercel-cron") !== null ||
+    /vercel-cron/i.test(ua) ||
+    req.headers.get("authorization")?.replace(/^Bearer\s+/i, "") === s ||
+    u.searchParams.get("secret") === s
+  );
 }
 
 export async function GET(req: Request) {
-  if (!(okFromVercelCron(req) || okFromSecret(req))) {
-    return new Response('Unauthorized', { status: 401 });
-  }
+  if (!authorized(req)) return new Response("Unauthorized", { status: 401 });
+  const t0 = Date.now();
+  const since = new Date(Date.now() - 24 * 3600_000);
 
-  // ---- ここに毎日の集計処理 ----
-  // 例:
-  // await doDailyAggregation();
-  // await refreshTrendingViews();
-  // await purgeCaches();
+  // 健全性チェック：公開/入荷の24h件数
+  const nPub = await prisma.video.count({
+    where: { platform: "youtube" as any, publishedAt: { gte: since } },
+  });
 
-  return new Response('ok', { status: 200 });
+  let nIng = 0;
+  try {
+    nIng = await prisma.video.count({
+      where: { platform: "youtube" as any, ...( { createdAt: { gte: since } } as any) },
+    });
+  } catch { /* createdAt 未導入なら 0 のまま */ }
+
+  // 必要ならここで集計テーブル更新 etc...
+  // await prisma.trending.deleteMany({ where: { window: '24h' } });
+  // ...
+
+  return Response.json({
+    ok: true,
+    counts24h: { published: nPub, ingested: nIng },
+    windowSince: since.toISOString(),
+    tookMs: Date.now() - t0,
+  }, { headers: { "Cache-Control": "no-store" } });
 }
