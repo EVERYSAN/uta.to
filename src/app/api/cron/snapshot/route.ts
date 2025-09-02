@@ -4,10 +4,10 @@ import { PrismaClient, Prisma } from "@prisma/client";
 
 export const runtime = "nodejs"; // Prisma を使うので Node 実行
 
-// ---- utils --------------------------------------------------------
+// ---- types --------------------------------------------------------
 type RefreshItem = {
-  platform?: string | null;           // default "youtube"
-  platformVideoId: string;            // 必須
+  platform?: string | null;             // default "youtube"
+  platformVideoId: string;              // 必須
   url?: string | null;
   title?: string | null;
   thumbnailUrl?: string | null;
@@ -20,6 +20,7 @@ type RefreshItem = {
 
 const prisma = new PrismaClient();
 
+// ---- utils --------------------------------------------------------
 function toDate(input: string | Date | null | undefined): Date | undefined {
   if (!input) return undefined;
   const d = typeof input === "string" ? new Date(input) : input;
@@ -78,15 +79,23 @@ export async function GET(req: Request) {
     for (const it of items) {
       const platform = (it.platform ?? "youtube").toLowerCase();
       const platformVideoId = it.platformVideoId?.trim();
-
       if (!platformVideoId) {
         skippedNoId++;
         continue;
       }
 
+      // ====== フォールバックを用意（create 用：必須を常に満たす） ======
+      const safeTitle =
+        (it.title ?? "").trim() || `video ${platformVideoId}`;
+      const safeUrl =
+        (it.url ?? "").trim() ||
+        `https://www.youtube.com/watch?v=${platformVideoId}`;
+      const safeThumb =
+        (it.thumbnailUrl ?? "").trim() ||
+        `https://i.ytimg.com/vi/${platformVideoId}/hqdefault.jpg`;
       const pub = toDate(it.publishedAt);
 
-      // update 用（Prisma.VideoUpdateInput）: null/undefined はそもそも入れない
+      // update 用（存在する値のみ。Unknown 等の上書きはしない）
       const updateData: Prisma.VideoUpdateInput = {
         ...(it.title ? { title: it.title } : {}),
         ...(it.url ? { url: it.url } : {}),
@@ -98,14 +107,13 @@ export async function GET(req: Request) {
         ...(pub ? { publishedAt: pub } : {}),
       };
 
-      // create 用（Prisma.VideoCreateInput）
-      // ⚠ title が schema 上で必須なので、必ず文字列を入れる（なければフォールバック）
+      // create 用（必須フィールドを確実にセット）
       const createData: Prisma.VideoCreateInput = {
         platform,
         platformVideoId,
-        title: it.title ?? `video ${platformVideoId}`, // ★ここが重要（必須を担保）
-        ...(it.url ? { url: it.url } : {}),
-        ...(it.thumbnailUrl ? { thumbnailUrl: it.thumbnailUrl } : {}),
+        title: safeTitle,          // ← 必須
+        url: safeUrl,              // ← 必須（今回のエラーの原因）
+        thumbnailUrl: safeThumb,   // 必須でなくても入れておくと表示が安定
         ...(typeof it.durationSec === "number" ? { durationSec: it.durationSec } : {}),
         ...(it.channelTitle ? { channelTitle: it.channelTitle } : {}),
         ...(typeof it.views === "number" ? { views: it.views } : {}),
