@@ -1,12 +1,14 @@
+// src/app/trending/page.tsx
 "use client";
 
-import { Suspense, useEffect, useMemo, useRef, useState } from "react";
+import Link from "next/link";
+import { Suspense, useEffect, useRef, useState } from "react";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 
-// 動的レンダー（SSR のプリレンダー絡みを回避）
+// SSRのプリレンダー絡みを避ける
 export const dynamic = "force-dynamic";
 
-// ===== ユーティリティ =====
+/* ========= utils ========= */
 const nf = new Intl.NumberFormat("ja-JP");
 const fmtCount = (n?: number | null) => (typeof n === "number" ? nf.format(n) : "0");
 const fmtDate = (iso?: string) => {
@@ -20,7 +22,7 @@ const fmtDate = (iso?: string) => {
   return `${y}/${m}/${day} ${hh}:${mm}`;
 };
 const secsToLabel = (s?: number | null) => {
-  if (!s && s !== 0) return "";
+  if (s == null) return "";
   const h = Math.floor(s / 3600);
   const m = Math.floor((s % 3600) / 60);
   const sec = Math.floor(s % 60);
@@ -29,7 +31,7 @@ const secsToLabel = (s?: number | null) => {
     : `${m}:${String(sec).padStart(2, "0")}`;
 };
 
-// ===== 型 =====
+/* ========= types ========= */
 type Video = {
   id: string;
   platform: "youtube";
@@ -47,7 +49,7 @@ type Video = {
 };
 type ApiList = { ok: boolean; items: Video[]; page?: number; take?: number; total?: number };
 
-// ===== バッジ =====
+/* ========= badge ========= */
 function TrendingBadge({ rank, range }: { rank?: number | null; range: "1d" | "7d" | "30d" }) {
   const label = rank ? `#${rank}` : "急上昇";
   const rangeText = range === "1d" ? "24時間" : range === "7d" ? "7日間" : "30日間";
@@ -59,13 +61,12 @@ function TrendingBadge({ rank, range }: { rank?: number | null; range: "1d" | "7
   );
 }
 
-// ===== 動画カード =====
+/* ========= card ========= */
 function VideoCard({ v, range }: { v: Video; range: "1d" | "7d" | "30d" }) {
   return (
-    <a
-      href={v.url}
-      target="_blank"
-      rel="noopener noreferrer"
+    <Link
+      href={`/${v.id}`}
+      prefetch={false}
       className="group block rounded-2xl overflow-hidden bg-zinc-900 hover:bg-zinc-800 transition-colors"
     >
       <div className="relative aspect-video bg-zinc-800">
@@ -101,11 +102,11 @@ function VideoCard({ v, range }: { v: Video; range: "1d" | "7d" | "30d" }) {
           )}
         </div>
       </div>
-    </a>
+    </Link>
   );
 }
 
-// ===== フィルタバー（#shorts用 2 状態）=====
+/* ========= filter bar ========= */
 type ShortsMode = "all" | "exclude";
 
 function FilterBar({
@@ -161,7 +162,7 @@ function FilterBar({
   );
 }
 
-// ===== 中身 =====
+/* ========= main ========= */
 function TrendingPageInner() {
   const search = useSearchParams();
   const router = useRouter();
@@ -191,7 +192,7 @@ function TrendingPageInner() {
     router.replace(`${pathname}?${qs.toString()}`, { scroll: false });
   };
 
-  // 条件が変わったら完全リセットして 1 ページ目から取得
+  // 条件が変わったら完全リセットして 1 ページ目から
   useEffect(() => {
     setItems([]);
     setPage(1);
@@ -243,7 +244,7 @@ function TrendingPageInner() {
     return () => ob.disconnect();
   }, [page, loading, hasMore]);
 
-  // 初期 URL → 状態同期（古い &shorts=only も all に寄せる）
+  // 初回：URL→state 同期（古い &shorts=only も all に寄せる）
   useEffect(() => {
     const r = (search.get("range") as "1d" | "7d" | "30d") || "1d";
     const sRaw = (search.get("shorts") as ShortsMode | "only") || "all";
@@ -253,13 +254,13 @@ function TrendingPageInner() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []); // 初回のみ
 
-  // 条件が変わった時にセクションを丸ごと再マウントさせるためのキー
+  // 条件が変わった時にセクションごと再マウント→表示ブレ抑制
   const listKey = `${range}-${shorts}`;
 
   return (
     <main className="mx-auto max-w-7xl px-4 py-6 space-y-4">
       <div className="flex items-center justify-between">
-        {/* ① 黒文字（ダークでも黒に固定してコントラスト確保） */}
+        {/* 黒文字でコントラスト確保 */}
         <h1 className="text-2xl md:text-3xl font-bold text-black">急上昇</h1>
       </div>
 
@@ -294,7 +295,7 @@ function TrendingPageInner() {
   );
 }
 
-// ===== Suspense でラップ =====
+/* ========= Suspense ========= */
 export default function TrendingPage() {
   return (
     <Suspense
