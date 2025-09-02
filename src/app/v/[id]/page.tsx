@@ -11,9 +11,10 @@ const prisma = new PrismaClient();
 /* ---------- helpers ---------- */
 const nf = new Intl.NumberFormat("ja-JP");
 const fmt = (n?: number | null) => (typeof n === "number" ? nf.format(n) : "0");
-const fmtDate = (iso?: string | null) => {
-  if (!iso) return "";
-  const d = new Date(iso);
+const fmtDate = (dt?: string | Date | null) => {
+  if (!dt) return "";
+  const d = typeof dt === "string" ? new Date(dt) : dt;
+  if (isNaN(d.getTime())) return "";
   const y = d.getFullYear();
   const m = String(d.getMonth() + 1).padStart(2, "0");
   const day = String(d.getDate()).padStart(2, "0");
