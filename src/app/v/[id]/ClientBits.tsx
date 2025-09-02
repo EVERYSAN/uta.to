@@ -1,4 +1,4 @@
-// src/app/[id]/ClientActions.tsx
+// src/app/v/[id]/ClientBits.tsx
 "use client";
 
 import { useEffect, useState } from "react";
