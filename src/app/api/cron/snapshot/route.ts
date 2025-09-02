@@ -27,7 +27,7 @@ export async function GET(req: Request) {
   const limit = Math.min(500, Math.max(50, Number(url.searchParams.get("limit") || "300") || 300));
   const query = url.searchParams.get("q") || undefined;
 
-  // 直近公開（publishedAfter+order=date）を取得
+  // 直近公開（publishedAfter + order=date）
   const { items } = await fetchRecentYouTubeSinceHours(hours, { limit, query });
 
   let upserts = 0;
@@ -35,35 +35,47 @@ export async function GET(req: Request) {
 
   for (const r of items) {
     try {
-      const platform = "youtube"; // 小文字に統一
+      const platform = "youtube";
       const platformVideoId = r.id;
 
-      // Prisma の型に合わせ、null のときはフィールドごと省略
-      const publishedAt: Date | undefined = r.publishedAt ? new Date(r.publishedAt) : undefined;
+      // publishedAt は schema で必須想定：無い行はスキップ
+      if (!r.publishedAt) continue;
+      const publishedAt = new Date(r.publishedAt);
+
+      // 文字列系は update=undefined（省略）、createは空文字フォールバックで“必須”にも耐性
+      const title = r.title ?? "(untitled)";
+      const urlStr = r.url ?? `https://www.youtube.com/watch?v=${platformVideoId}`;
+      const thumb = r.thumbnailUrl ?? undefined;        // update では省略可能
+      const channel = r.channelTitle ?? "";             // create で必須でもOK
+
+      // 数値系は undefined を使う（null は渡さない）
+      const duration = r.durationSec ?? undefined;
+      const views = r.views ?? undefined;
+      const likes = r.likes ?? undefined;
 
       await prisma.video.upsert({
-        where: { platform_platformVideoId: { platform, platformVideoId } }, // ← 余計な '_' を削除
+        where: { platform_platformVideoId: { platform, platformVideoId } },
         update: {
-          title: r.title ?? null,
-          url: r.url ?? `https://www.youtube.com/watch?v=${platformVideoId}`,
-          thumbnailUrl: r.thumbnailUrl ?? null,
-          durationSec: r.durationSec ?? null,
-          ...(publishedAt ? { publishedAt } : {}), // nullは渡さない
-          channelTitle: r.channelTitle ?? null,
-          views: r.views ?? null,
-          likes: r.likes ?? null,
+          title,                                    // string
+          url: urlStr,                              // string
+          ...(thumb !== undefined ? { thumbnailUrl: thumb } : {}), // string | undefined
+          ...(duration !== undefined ? { durationSec: duration } : {}), // number | undefined
+          publishedAt,                              // Date（必須）
+          channelTitle: channel,                    // string
+          ...(views !== undefined ? { views } : {}),
+          ...(likes !== undefined ? { likes } : {}),
         },
         create: {
           platform,
           platformVideoId,
-          title: r.title ?? null,
-          url: r.url ?? `https://www.youtube.com/watch?v=${platformVideoId}`,
-          thumbnailUrl: r.thumbnailUrl ?? null,
-          durationSec: r.durationSec ?? null,
-          ...(publishedAt ? { publishedAt } : {}), // nullは渡さない
-          channelTitle: r.channelTitle ?? null,
-          views: r.views ?? null,
-          likes: r.likes ?? null,
+          title,                                    // string（空文字fallback済み）
+          url: urlStr,                              // string
+          thumbnailUrl: thumb ?? "",                // string に寄せる
+          durationSec: duration,                    // number | undefined
+          publishedAt,                              // Date（必須）
+          channelTitle: channel,                    // string（空文字fallback済み）
+          views,
+          likes,
           // createdAt は schema の @default(now()) に任せる
         },
         select: { id: true },
