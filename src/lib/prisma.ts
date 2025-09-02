@@ -1,19 +1,16 @@
+// src/lib/prisma.ts
 import { PrismaClient } from "@prisma/client";
 
-// グローバルに1個だけ保持して、開きすぎるのを防ぐ（Vercel等のサーバレス対策）
-declare global {
-  // eslint-disable-next-line no-var
-  var prisma: PrismaClient | undefined;
-}
+const globalForPrisma = globalThis as unknown as { prisma?: PrismaClient };
 
 export const prisma =
-  globalThis.prisma ??
+  globalForPrisma.prisma ??
   new PrismaClient({
-    log: ["error", "warn"], // 必要なら "query" も追加可
+    log: [{ emit: "event", level: "error" }, { emit: "event", level: "warn" }],
   });
 
-if (process.env.NODE_ENV !== "production") {
-  globalThis.prisma = prisma;
-}
+if (process.env.NODE_ENV !== "production") globalForPrisma.prisma = prisma;
 
-export default prisma;
+// 追加：ログを標準出力へ（Vercel Functions で拾える）
+prisma.$on("warn", (e) => console.warn("[Prisma warn]", e));
+prisma.$on("error", (e) => console.error("[Prisma error]", e));
