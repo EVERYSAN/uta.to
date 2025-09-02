@@ -1,79 +1,119 @@
-// src/app/api/cron/snapshot/route.ts
+// src/app/api/refresh/youtube/route.ts
 export const dynamic = "force-dynamic";
 
+import { NextResponse } from "next/server";
 import { PrismaClient } from "@prisma/client";
-import { fetchRecentYouTubeSinceHours } from "@/lib/youtube";
+import { fetchDetails } from "@/lib/youtube";
 
 const prisma = new PrismaClient();
 
-function authorized(req: Request) {
-  const u = new URL(req.url);
-  const s = process.env.CRON_SECRET ?? "";
-  const ua = req.headers.get("user-agent") || "";
-  return (
-    req.headers.get("x-vercel-cron") !== null ||
-    /vercel-cron/i.test(ua) ||
-    req.headers.get("authorization")?.replace(/^Bearer\s+/i, "") === s ||
-    u.searchParams.get("secret") === s
-  );
+/**
+ * /api/refresh/youtube?ids=AaBbCc,DdEeF
+ * もしくは POST { "ids": ["AaBbCc", "DdEeF"] }
+ * の形で呼び出し、指定IDの動画詳細をYouTubeから取り直してDB更新します。
+ */
+export async function GET(req: Request) {
+  try {
+    const url = new URL(req.url);
+    const idsParam = url.searchParams.get("ids") || "";
+    const ids = idsParam
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean);
+
+    if (ids.length === 0) {
+      return NextResponse.json(
+        { ok: false, error: "required: ids (comma separated)" },
+        { status: 400 }
+      );
+    }
+
+    return NextResponse.json(await refreshByIds(ids), {
+      headers: { "Cache-Control": "no-store" },
+    });
+  } catch (e: any) {
+    return NextResponse.json(
+      { ok: false, error: String(e?.message || e) },
+      { status: 500 }
+    );
+  }
 }
 
-export async function GET(req: Request) {
-  if (!authorized(req)) return new Response("Unauthorized", { status: 401 });
+export async function POST(req: Request) {
+  try {
+    const body = (await req.json().catch(() => ({}))) as any;
+    const ids: string[] = Array.isArray(body?.ids) ? body.ids : [];
+
+    if (ids.length === 0) {
+      return NextResponse.json(
+        { ok: false, error: "required: JSON body { ids: string[] }" },
+        { status: 400 }
+      );
+    }
+
+    return NextResponse.json(await refreshByIds(ids), {
+      headers: { "Cache-Control": "no-store" },
+    });
+  } catch (e: any) {
+    return NextResponse.json(
+      { ok: false, error: String(e?.message || e) },
+      { status: 500 }
+    );
+  }
+}
+
+async function refreshByIds(ids: string[]) {
   const t0 = Date.now();
-
-  const url = new URL(req.url);
-  const hours = Math.min(72, Math.max(6, Number(url.searchParams.get("sinceHours") || "48") || 48));
-  const limit = Math.min(500, Math.max(50, Number(url.searchParams.get("limit") || "300") || 300));
-  const query = url.searchParams.get("q") || undefined;
-
-  // 直近公開（publishedAfter + order=date）
-  const { items } = await fetchRecentYouTubeSinceHours(hours, { limit, query });
+  const details = await fetchDetails(ids); // YouTube /videos から詳細取得
+  const platform = "youtube";
 
   let upserts = 0;
+  let skippedNoPublishedAt = 0;
   const errors: string[] = [];
 
-  for (const r of items) {
+  for (const v of details) {
     try {
-      const platform = "youtube";
-      const platformVideoId = r.id;
+      const platformVideoId = v.id;
 
-      // publishedAt は schema で必須想定：無い行はスキップ
-      if (!r.publishedAt) continue;
-      const publishedAt = new Date(r.publishedAt);
+      // publishedAt はスキーマ上 DateTime（必須想定）。無いものは更新しない。
+      if (!v.publishedAt) {
+        skippedNoPublishedAt++;
+        continue;
+      }
+      const publishedAt = new Date(v.publishedAt);
 
-      // 文字列系は update=undefined（省略）、createは空文字フォールバックで“必須”にも耐性
-      const title = r.title ?? "(untitled)";
-      const urlStr = r.url ?? `https://www.youtube.com/watch?v=${platformVideoId}`;
-      const thumb = r.thumbnailUrl ?? undefined;        // update では省略可能
-      const channel = r.channelTitle ?? "";             // create で必須でもOK
+      // 文字列フィールドは null を渡さず、undefined で「省略する」。
+      const title: string | undefined = v.title ?? undefined;
+      const urlStr: string = `https://www.youtube.com/watch?v=${platformVideoId}`;
+      const thumbnailUrl: string | undefined = v.thumbnailUrl ?? undefined;
+      const channelTitle: string | undefined = v.channelTitle ?? undefined;
 
-      // 数値系は undefined を使う（null は渡さない）
-      const duration = r.durationSec ?? undefined;
-      const views = r.views ?? undefined;
-      const likes = r.likes ?? undefined;
+      // 数値も null は渡さず undefined。
+      const durationSec: number | undefined = v.durationSec ?? undefined;
+      const views: number | undefined = v.views ?? undefined;
+      const likes: number | undefined = v.likes ?? undefined;
 
       await prisma.video.upsert({
         where: { platform_platformVideoId: { platform, platformVideoId } },
         update: {
-          title,                                    // string
-          url: urlStr,                              // string
-          ...(thumb !== undefined ? { thumbnailUrl: thumb } : {}), // string | undefined
-          ...(duration !== undefined ? { durationSec: duration } : {}), // number | undefined
-          publishedAt,                              // Date（必須）
-          channelTitle: channel,                    // string
+          ...(title !== undefined ? { title } : {}),
+          url: urlStr, // 常にURLは補正
+          ...(thumbnailUrl !== undefined ? { thumbnailUrl } : {}),
+          ...(channelTitle !== undefined ? { channelTitle } : {}),
+          ...(durationSec !== undefined ? { durationSec } : {}),
+          publishedAt, // まれに変化する可能性があるので上書き
           ...(views !== undefined ? { views } : {}),
           ...(likes !== undefined ? { likes } : {}),
         },
         create: {
           platform,
           platformVideoId,
-          title,                                    // string（空文字fallback済み）
-          url: urlStr,                              // string
-          thumbnailUrl: thumb ?? "",                // string に寄せる
-          durationSec: duration,                    // number | undefined
-          publishedAt,                              // Date（必須）
-          channelTitle: channel,                    // string（空文字fallback済み）
+          title: title ?? "(untitled)", // create は空文字/デフォルトで埋める
+          url: urlStr,
+          thumbnailUrl: thumbnailUrl ?? "",
+          channelTitle: channelTitle ?? "",
+          durationSec,
+          publishedAt,
           views,
           likes,
           // createdAt は schema の @default(now()) に任せる
@@ -87,21 +127,20 @@ export async function GET(req: Request) {
     }
   }
 
+  // 直近の公開/入荷の確認
   const latest = await prisma.video.findFirst({
     orderBy: [{ publishedAt: "desc" }],
-    select: { publishedAt: true, createdAt: true, platform: true },
+    select: { platform: true, publishedAt: true, createdAt: true },
   });
 
-  return Response.json(
-    {
-      ok: true,
-      params: { hours, limit, query },
-      fetched: items.length,
-      upserts,
-      latest,
-      tookMs: Date.now() - t0,
-      errors: errors.length ? errors.slice(0, 3) : undefined,
-    },
-    { headers: { "Cache-Control": "no-store" } }
-  );
+  return {
+    ok: true,
+    requested: ids.length,
+    fetched: details.length,
+    upserts,
+    skippedNoPublishedAt,
+    latest,
+    tookMs: Date.now() - t0,
+    errors: errors.length ? errors.slice(0, 5) : undefined,
+  };
 }
