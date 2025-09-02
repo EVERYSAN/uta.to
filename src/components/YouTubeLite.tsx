@@ -1,19 +1,18 @@
-// src/components/YouTubeLite.tsx
 'use client';
 
 import { useMemo, useState } from 'react';
 
 type Props = {
-  /** ID でも URL でもOK（/watch?v=.. や /shorts/.. も可） */
+  /** YouTubeのIDでもURLでもOK（watch?v=..., youtu.be, /shorts/... に対応） */
   idOrUrl: string;
   title?: string;
   poster?: 'hqdefault' | 'mqdefault' | 'sddefault' | 'maxresdefault';
   noCookie?: boolean;
 
-  /** 縦動画と分かっている場合に指定（未指定なら URL に /shorts/ を含むかで推定） */
+  /** 縦動画かどうか（未指定なら URL が /shorts/ を含む場合に自動推定） */
   isVertical?: boolean;
 
-  /** プレイヤー直下に「YouTubeで開く」を出すか（モバイルの邪魔回避のため既定 false） */
+  /** 枠の下にだけ「YouTubeで開く」を出したい時（モバイルの邪魔回避のため既定 false） */
   showOpenExternal?: boolean;
 };
 
@@ -34,10 +33,9 @@ export default function YouTubeLite({
         ? isVertical
         : /(^|\/)shorts(\/|$)/.test(idOrUrl);
     return { id, verticalGuess };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [idOrUrl, isVertical]);
 
-  // IDが取れない場合はフォールバック（オーバーレイではなく枠内に静的表示）
+  // IDを解決できない場合は枠内で静的フォールバック
   if (!id) {
     const watch = toWatchUrl(idOrUrl);
     return (
@@ -63,11 +61,10 @@ export default function YouTubeLite({
   const thumb = `https://i.ytimg.com/vi/${id}/${poster}.jpg`;
   const embed = `${base}/embed/${id}?autoplay=1&playsinline=1&rel=0&modestbranding=1`;
 
-  // モバイルで縦なら 9:16 の比率にする（上部ナビのパディングがある分、実質ほぼ全画面）
+  // 縦動画→モバイルでは 9:16、sm以上は 16:9 に戻す
   const isVerticalFinal = verticalGuess === true;
   const wrapperClass = isVerticalFinal
-    ? // モバイル既定=縦比率、sm以上=従来の16:9
-      'relative w-full overflow-hidden rounded-xl bg-black aspect-[9/16] sm:aspect-video'
+    ? 'relative w-full overflow-hidden rounded-xl bg-black aspect-[9/16] sm:aspect-video'
     : 'relative w-full overflow-hidden rounded-xl bg-black aspect-video';
 
   return (
@@ -136,16 +133,19 @@ function toYouTubeId(input?: string | null): string | null {
     const host = u.hostname.replace(/^www\./, '');
     const parts = u.pathname.split('/').filter(Boolean);
 
+    // youtu.be/VIDEOID
     if (host === 'youtu.be' && parts[0] && /^[\w-]{11}/.test(parts[0])) {
       return parts[0].substring(0, 11);
     }
+    // youtube.com/watch?v=VIDEOID
     const v = u.searchParams.get('v');
     if (v && /^[\w-]{11}/.test(v)) return v.substring(0, 11);
-
+    // /embed/VIDEOID
     const i = parts.indexOf('embed');
     if (i >= 0 && parts[i + 1] && /^[\w-]{11}/.test(parts[i + 1])) {
       return parts[i + 1].substring(0, 11);
     }
+    // /shorts/VIDEOID
     if (parts[0] === 'shorts' && parts[1] && /^[\w-]{11}/.test(parts[1])) {
       return parts[1].substring(0, 11);
     }
