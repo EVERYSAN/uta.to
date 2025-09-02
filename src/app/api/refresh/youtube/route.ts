@@ -1,100 +1,92 @@
 // src/app/api/refresh/youtube/route.ts
 import { NextResponse } from "next/server";
-import { PrismaClient, Prisma } from "@prisma/client";
-import { fetchRecentYouTube, type RawVideo } from "@/lib/youtube";
+import { prisma } from "@/lib/prisma";
+import { fetchRecentYouTube } from "@/lib/youtube";
 
-export const runtime = "nodejs";
+// （任意）Vercelで動的実行にする
 export const dynamic = "force-dynamic";
 
-const prisma = new PrismaClient();
-
-// URLからYouTubeのvideoIdをフォールバック抽出（もしidが無い場合の保険）
-function extractYouTubeIdFromUrl(url?: string | null): string | "" {
-  if (!url) return "";
-  try {
-    const u = new URL(url);
-    if (u.hostname.includes("youtube.com")) {
-      const v = u.searchParams.get("v");
-      return v ?? "";
-    }
-    if (u.hostname === "youtu.be") {
-      return u.pathname.replace("/", "");
-    }
-  } catch {
-    // noop
-  }
-  return "";
+function parseIntSafe(v: string | null, def: number) {
+  const n = v ? Number(v) : NaN;
+  return Number.isFinite(n) ? n : def;
 }
 
 export async function GET(req: Request) {
   try {
-    const { searchParams } = new URL(req.url);
-    const hours = Number(searchParams.get("hours") ?? "24");
-    const limit = Number(searchParams.get("limit") ?? "100");
-    const query = searchParams.get("query") ?? undefined;
+    const url = new URL(req.url);
+    const hours = parseIntSafe(url.searchParams.get("hours"), 24);
+    const limit = parseIntSafe(url.searchParams.get("limit"), 200);
+    const query = url.searchParams.get("query") ?? undefined;
 
-    // YouTubeから最近の動画候補を取得（RawVideo[]）
-    const list: RawVideo[] = await fetchRecentYouTube({ hours, limit, query });
+    // fetchRecentYouTube は RawVideo[] または { items: RawVideo[] } を返し得る
+    const raw = (await fetchRecentYouTube({ hours, limit, query } as any)) as
+      | any[]
+      | { items?: any[] };
+    const list = Array.isArray(raw) ? raw : raw?.items ?? [];
 
     let fetched = list.length;
     let upserts = 0;
     let skippedNoId = 0;
 
     for (const it of list) {
-      const platform = "youtube" as const;
-
-      // RawVideo は id を持つ前提。なければURLから抽出を試みる
-      const platformVideoId =
-        it.id || extractYouTubeIdFromUrl(it.url) || "";
+      const platform = "youtube";
+      // いまの型では platformVideoId は直接は無い想定。id を優先、無ければ空文字
+      const platformVideoId: string =
+        (it as any).platformVideoId ??
+        (it as any)?.contentDetails?.videoId ??
+        (it as any).id ??
+        "";
 
       if (!platformVideoId) {
         skippedNoId++;
         continue;
       }
 
-      // Prisma の create 側は undefined を許さないので、必須は安全なフォールバックを用意
-      const safeTitle = it.title ?? `video ${platformVideoId}`;
-      const safeUrl =
-        it.url ?? `https://www.youtube.com/watch?v=${platformVideoId}`;
-      const safePublishedAt = new Date(
-        it.publishedAt ?? Date.now() // schemaが必須でも通るように現在時刻でフォールバック
-      );
+      // 必須フィールドはここで確定（fallback あり）
+      const publishedAtStr: string | undefined = (it as any).publishedAt;
+      const publishedAt = publishedAtStr ? new Date(publishedAtStr) : new Date();
 
-      // ---- create 用（必須フィールドは確実に埋める）----
-      const createData: Prisma.VideoUncheckedCreateInput = {
+      const title: string = (it as any).title ?? `video ${platformVideoId}`;
+      const urlStr: string =
+        (it as any).url ??
+        `https://www.youtube.com/watch?v=${platformVideoId}`;
+
+      // 任意フィールドは undefined を渡さない（存在するものだけ spread）
+      const thumbnailUrl: string | undefined = (it as any).thumbnailUrl;
+      const durationSec: number | undefined = (it as any).durationSec;
+      const channelTitle: string | undefined = (it as any).channelTitle;
+      const views: number | undefined = (it as any).views;
+      const likes: number | undefined = (it as any).likes;
+
+      const createData: Parameters<typeof prisma.video.upsert>[0]["create"] = {
         platform,
         platformVideoId,
-        title: safeTitle,
-        url: safeUrl,
-        publishedAt: safePublishedAt,
+        title,
+        url: urlStr,
+        publishedAt,
+        ...(thumbnailUrl ? { thumbnailUrl } : {}),
+        ...(typeof durationSec === "number" ? { durationSec } : {}),
+        ...(channelTitle ? { channelTitle } : {}),
+        ...(typeof views === "number" ? { views } : {}),
+        ...(typeof likes === "number" ? { likes } : {}),
       };
-      // 任意項目は「あるときだけ」足す（undefinedを入れない）
-      if (it.thumbnailUrl) createData.thumbnailUrl = it.thumbnailUrl;
-      if (typeof it.durationSec === "number")
-        createData.durationSec = it.durationSec;
-      if (typeof it.views === "number") createData.views = it.views;
-      if (typeof it.likes === "number") createData.likes = it.likes;
-      if (it.channelTitle) createData.channelTitle = it.channelTitle;
 
-      // ---- update 用（変わり得る項目のみ）----
-      const updateData: Prisma.VideoUncheckedUpdateInput = {
-        title: safeTitle,
-        url: safeUrl,
+      const updateData: Parameters<typeof prisma.video.upsert>[0]["update"] = {
+        title,
+        url: urlStr,
+        ...(thumbnailUrl ? { thumbnailUrl } : {}),
+        ...(typeof durationSec === "number" ? { durationSec } : {}),
+        ...(channelTitle ? { channelTitle } : {}),
+        ...(typeof views === "number" ? { views } : {}),
+        ...(typeof likes === "number" ? { likes } : {}),
+        ...(publishedAtStr ? { publishedAt } : {}), // 公開日時が取れたときのみ上書き
       };
-      if (it.thumbnailUrl) updateData.thumbnailUrl = it.thumbnailUrl;
-      if (typeof it.durationSec === "number")
-        updateData.durationSec = it.durationSec;
-      if (typeof it.views === "number") updateData.views = it.views;
-      if (typeof it.likes === "number") updateData.likes = it.likes;
-      if (it.channelTitle) updateData.channelTitle = it.channelTitle;
-      if (it.publishedAt) updateData.publishedAt = new Date(it.publishedAt);
 
       await prisma.video.upsert({
         where: { platform_platformVideoId: { platform, platformVideoId } },
         create: createData,
         update: updateData,
       });
-
       upserts++;
     }
 
@@ -102,15 +94,15 @@ export async function GET(req: Request) {
       ok: true,
       route: "refresh/youtube",
       params: { hours, limit, query },
-      fetched,
+      requested: fetched,
       upserts,
       skippedNoId,
     });
   } catch (err: any) {
-    console.error(err);
+    console.error("refresh/youtube error", err);
     return NextResponse.json(
       { ok: false, route: "refresh/youtube", error: String(err?.message ?? err) },
-      { status: 500 }
+      { status: 500 },
     );
   }
 }
