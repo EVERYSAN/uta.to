@@ -1,4 +1,3 @@
-// src/app/v/[id]/page.tsx
 import { PrismaClient } from '@prisma/client';
 import { notFound } from 'next/navigation';
 import Link from 'next/link';
@@ -33,7 +32,7 @@ const secsToLabel = (s?: number | null) => {
     : `${m}:${String(sec).padStart(2, '0')}`;
 };
 
-/** ★追加: URL/ID/shorts から 11桁のYouTube IDを抽出 */
+/** URL/ID/shorts から 11桁のYouTube IDを抽出（既存のあなたの実装を流用） */
 function toYouTubeId(input?: string | null): string | null {
   if (!input) return null;
   if (/^[a-zA-Z0-9_-]{11}$/.test(input)) return input; // 既にID
@@ -141,21 +140,27 @@ export default async function VideoDetailPage({ params }: Params) {
     related = [...related, ...more];
   }
 
-  // ★追加: 正規化したIDを作る（platformVideoIdがURLでもOK）
+  // 正規化（platformVideoId が URL でもOK）
   const idOrUrl = v.platformVideoId || v.url || '';
   const ytId = toYouTubeId(idOrUrl);
+  const isVertical = /(^|\/)shorts(\/|$)/.test(idOrUrl);
 
   return (
     <main className="mx-auto max-w-7xl px-4 py-6 grid grid-cols-1 lg:grid-cols-12 gap-6">
       {/* 左：プレイヤー＆メタ */}
       <article className="lg:col-span-8 space-y-4">
-        <div className="aspect-video rounded-2xl overflow-hidden bg-black">
+        {/* 外側の aspect-video を外し、比率は YouTubeLite 側で制御 */}
+        <div className="rounded-2xl overflow-hidden">
           {v.platform === 'youtube' ? (
             ytId ? (
-              <YouTubeLite idOrUrl={ytId} title={v.title ?? 'video'} />
+              <YouTubeLite
+                idOrUrl={ytId}           // IDでもURLでもOK（ここはIDを渡してOK）
+                isVertical={isVertical}  // 縦動画ならモバイルで 9:16 表示
+                title={v.title ?? 'video'}
+              />
             ) : (
-              // IDが取れない場合のフォールバック
-              <div className="w-full h-full grid place-items-center bg-zinc-900 text-zinc-200">
+              // IDが取れない場合のフォールバック（小さくボタン表示）
+              <div className="w-full aspect-video grid place-items-center bg-zinc-900 text-zinc-200">
                 <a
                   href={v.url ?? '#'}
                   target="_blank"
@@ -171,7 +176,7 @@ export default async function VideoDetailPage({ params }: Params) {
             <iframe
               src={v.url ?? ''}
               title={v.title ?? 'video'}
-              className="w-full h-full"
+              className="w-full aspect-video"
               allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
               allowFullScreen
             />
