@@ -1,252 +1,235 @@
+// src/app/[id]/page.tsx
+import { PrismaClient } from "@prisma/client";
 import { notFound } from "next/navigation";
 import Link from "next/link";
-import Image from "next/image";
-import type { Metadata } from "next";
-import { prisma } from "@/lib/prisma";
-import { FavButton, ShareButton } from "./ClientBits";
+import ClientActions from "./ClientActions";
 
-// 5分で再生成
-export const revalidate = 300;
+export const dynamic = "force-dynamic"; // キャッシュしない
 
-// 動画IDごとのメタ
-export async function generateMetadata(
-  { params }: { params: { id: string } }
-): Promise<Metadata> {
-  const v = await prisma.video.findUnique({
-    where: { id: params.id },
-    select: {
-      title: true,
-      platformVideoId: true,
-      channelTitle: true,
-      description: true,
-    },
-  });
-  if (!v) return {};
-  const og = v.platformVideoId
-    ? `https://i.ytimg.com/vi/${v.platformVideoId}/hqdefault.jpg`
-    : undefined;
-  return {
-    title: v.title ?? "うたみた",
-    description: v.description ?? undefined,
-    openGraph: {
-      title: v.title ?? "うたみた",
-      description: v.description ?? undefined,
-      images: og ? [{ url: og }] : undefined,
-      type: "video.other",
-    },
-  };
-}
+const prisma = new PrismaClient();
 
-export default async function VideoDetailPage({
-  params,
-}: { params: { id: string } }) {
-  const id = params.id;
+/* ---------- 小ユーティリティ ---------- */
+const nf = new Intl.NumberFormat("ja-JP");
+const fmt = (n?: number | null) => (typeof n === "number" ? nf.format(n) : "0");
+const fmtDate = (iso?: string | null) => {
+  if (!iso) return "";
+  const d = new Date(iso);
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  const hh = String(d.getHours()).padStart(2, "0");
+  const mm = String(d.getMinutes()).padStart(2, "0");
+  return `${y}/${m}/${day} ${hh}:${mm}`;
+};
+const secsToLabel = (s?: number | null) => {
+  if (s == null) return "";
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  const sec = Math.floor(s % 60);
+  return h > 0
+    ? `${h}:${String(m).padStart(2, "0")}:${String(sec).padStart(2, "0")}`
+    : `${m}:${String(sec).padStart(2, "0")}`;
+};
 
-  // 単体動画
-  const video = await prisma.video.findUnique({
-    where: { id },
-    select: {
-      id: true,
-      title: true,
-      platform: true,
-      platformVideoId: true,
-      description: true,
-      channelTitle: true,
-      publishedAt: true,
-      views: true,
-      likes: true,
-      durationSec: true,
-    },
-  });
-  if (!video) notFound();
-
-  // 関連（同一チャンネルを優先、直近30日）
-  const related = await prisma.video.findMany({
-    where: {
-      platform: "youtube",
-      id: { not: id },
-      AND: [
-        { publishedAt: { gte: new Date(Date.now() - 1000 * 60 * 60 * 24 * 30) } },
-        video.channelTitle ? { channelTitle: video.channelTitle } : {},
-      ],
-    },
-    orderBy: [{ views: "desc" as const }, { publishedAt: "desc" as const }, { id: "asc" as const }],
-    take: 12,
-    select: {
-      id: true,
-      title: true,
-      platformVideoId: true,
-      publishedAt: true,
-      views: true,
-    },
-  });
-
-  // 応援指数（簡易）
-  const views = video.views ?? 0;
-  const likes = video.likes ?? 0;
-  const hours = Math.max(1, (Date.now() - new Date(video.publishedAt).getTime()) / 3_600_000);
-  const velocity = (views + likes * 5) / hours;
-  const supportPct = Math.max(0, Math.min(100, Math.round((velocity / (velocity + 300)) * 100)));
-
-  const ytId = video.platformVideoId ?? "";
-  const embedSrc =
-    video.platform === "youtube" && ytId
-      ? `https://www.youtube.com/embed/${ytId}?rel=0`
-      : undefined;
-  const thumb = ytId ? `https://i.ytimg.com/vi/${ytId}/hqdefault.jpg` : "/og.png";
-
+function TrendingBadge({
+  rank,
+  range = "1d",
+}: {
+  rank?: number | null;
+  range?: "1d" | "7d" | "30d";
+}) {
+  const label = rank ? `#${rank}` : "急上昇";
+  const rangeText = range === "1d" ? "24時間" : range === "7d" ? "7日間" : "30日間";
   return (
-    <div className="mx-auto max-w-7xl px-4 py-6">
-      {/* パンくず */}
-      <div className="mb-3 text-sm text-zinc-400">
-        <Link href="/" className="hover:underline">ホーム</Link>
-        <span className="mx-2">/</span>
-        <Link href="/trending" className="hover:underline">急上昇</Link>
-      </div>
-
-      <div className="grid gap-6 lg:grid-cols-[1fr_360px]">
-        {/* 左：プレイヤー＋本文 */}
-        <section>
-          <div className="aspect-video w-full overflow-hidden rounded-2xl bg-black">
-            {embedSrc ? (
-              <iframe
-                className="h-full w-full"
-                src={embedSrc}
-                title={video.title ?? "video"}
-                allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
-                allowFullScreen
-                loading="lazy"
-              />
-            ) : (
-              <Image
-                src={thumb}
-                alt={video.title ?? ""}
-                width={1280}
-                height={720}
-                className="h-full w-full object-cover"
-              />
-            )}
-          </div>
-
-          <h1 className="mt-4 text-xl font-semibold text-white leading-7">
-            {video.title}
-          </h1>
-
-          <div className="mt-2 flex flex-wrap items-center gap-3 text-sm text-zinc-400">
-            <span className="rounded-full bg-zinc-800/60 px-3 py-1">
-              {formatDate(video.publishedAt)} 公開
-            </span>
-            {video.channelTitle && (
-              <span className="rounded-full bg-zinc-800/60 px-3 py-1">
-                {video.channelTitle}
-              </span>
-            )}
-            <span className="rounded-full bg-zinc-800/60 px-3 py-1">
-              👁‍🗨 {formatNum(views)}
-            </span>
-            <span className="rounded-full bg-zinc-800/60 px-3 py-1">
-              ❤️ {formatNum(likes)}
-            </span>
-
-            <div className="ml-auto flex items-center gap-2">
-              <FavButton videoId={video.id} />
-              <ShareButton />
-              <Link
-                href={`/report?videoId=${video.id}`}
-                className="rounded-lg border border-zinc-800 px-3 py-1.5 text-sm text-zinc-300 hover:bg-zinc-800"
-              >
-                通報
-              </Link>
-            </div>
-          </div>
-
-          {video.description && (
-            <p className="mt-4 whitespace-pre-wrap rounded-2xl bg-zinc-900/60 p-4 text-sm leading-6 text-zinc-300">
-              {video.description}
-            </p>
-          )}
-        </section>
-
-        {/* 右：応援/広告/関連 */}
-        <aside className="space-y-6">
-          {/* 応援表示 */}
-          <div className="rounded-2xl bg-zinc-900/60 p-4">
-            <div className="mb-2 flex items-center justify-between">
-              <h2 className="text-sm font-semibold text-white">応援指数</h2>
-              <span className="text-xs text-zinc-400">（直近の勢い）</span>
-            </div>
-            <div className="mt-2">
-              <div className="h-2 w-full overflow-hidden rounded-full bg-zinc-800">
-                <div
-                  className="h-full rounded-full bg-violet-500"
-                  style={{ width: `${supportPct}%` }}
-                />
-              </div>
-              <div className="mt-2 text-xs text-zinc-400">
-                速度: {velocity.toFixed(1)} /h　|　スコア: {supportPct}%
-              </div>
-              <div className="mt-3 text-sm text-zinc-300">
-                {supportPct >= 70
-                  ? "いま大きく伸びています。いいねやシェアで後押ししよう！"
-                  : supportPct >= 40
-                  ? "これから伸びるかも。コメントや高評価で応援しよう！"
-                  : "まだ見つかっていない動画。あなたの一票が力になります。"}
-              </div>
-            </div>
-          </div>
-
-          {/* 広告（将来） */}
-          <div className="rounded-2xl border border-dashed border-zinc-800 p-6 text-center text-xs text-zinc-500">
-            広告枠（将来: 詳細の右側のみ）
-          </div>
-
-          {/* 関連 */}
-          <div className="space-y-3">
-            <h3 className="px-1 text-sm font-semibold text-white">関連動画</h3>
-            {related.length === 0 && (
-              <p className="px-1 text-sm text-zinc-400">関連は見つかりませんでした</p>
-            )}
-            <ul className="space-y-3">
-              {related.map((r) => (
-                <li key={r.id}>
-                  <Link
-                    href={`/v/${r.id}`}
-                    className="flex gap-3 rounded-xl p-2 hover:bg-zinc-900/60"
-                  >
-                    <div className="relative h-16 w-28 overflow-hidden rounded-lg bg-black">
-                      <Image
-                        src={`https://i.ytimg.com/vi/${r.platformVideoId}/mqdefault.jpg`}
-                        alt={r.title ?? ""}
-                        fill
-                        sizes="112px"
-                        className="object-cover"
-                      />
-                    </div>
-                    <div className="min-w-0">
-                      <p className="line-clamp-2 text-sm text-zinc-100">{r.title}</p>
-                      <div className="mt-1 text-xs text-zinc-400">
-                        {formatDate(r.publishedAt)}・👁‍🗨 {formatNum(r.views ?? 0)}
-                      </div>
-                    </div>
-                  </Link>
-                </li>
-              ))}
-            </ul>
-          </div>
-        </aside>
-      </div>
+    <div className="inline-flex items-center gap-1 rounded-full bg-violet-600/20 text-violet-300 px-2 py-0.5 text-[11px]">
+      <span>⬆</span><span className="font-medium">{label}</span>
+      <span className="opacity-70">/ {rangeText}</span>
     </div>
   );
 }
 
-/* utils */
-function formatNum(n: number) {
-  return new Intl.NumberFormat("ja-JP").format(n);
-}
-function formatDate(d: Date) {
-  return new Intl.DateTimeFormat("ja-JP", {
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-  }).format(new Date(d));
+type Params = { params: { id: string } };
+
+export default async function VideoDetailPage({ params }: Params) {
+  const idParam = params.id;
+
+  // まずは DB の id で検索、見つからなければ platformVideoId でも検索（安全策）
+  let v =
+    (await prisma.video.findUnique({
+      where: { id: idParam },
+      select: {
+        id: true,
+        platform: true,
+        platformVideoId: true,
+        title: true,
+        url: true,
+        thumbnailUrl: true,
+        durationSec: true,
+        publishedAt: true,
+        channelTitle: true,
+        views: true,
+        likes: true,
+        trendingRank: true,
+        trendingScore: true,
+      },
+    })) ??
+    (await prisma.video.findFirst({
+      where: { platformVideoId: idParam },
+      select: {
+        id: true,
+        platform: true,
+        platformVideoId: true,
+        title: true,
+        url: true,
+        thumbnailUrl: true,
+        durationSec: true,
+        publishedAt: true,
+        channelTitle: true,
+        views: true,
+        likes: true,
+        trendingRank: true,
+        trendingScore: true,
+      },
+    }));
+
+  if (!v) notFound();
+
+  // 関連（同チャンネル優先 → 足りなければ直近急上昇で補完）
+  let related = await prisma.video.findMany({
+    where: {
+      id: { not: v.id },
+      platform: "youtube",
+      channelTitle: v.channelTitle ?? undefined,
+    },
+    orderBy: [{ trendingRank: "asc" }, { publishedAt: "desc" }],
+    take: 12,
+    select: {
+      id: true,
+      title: true,
+      thumbnailUrl: true,
+      durationSec: true,
+      views: true,
+      publishedAt: true,
+      trendingRank: true,
+    },
+  });
+
+  if (related.length < 8) {
+    const more = await prisma.video.findMany({
+      where: {
+        id: { not: v.id },
+        platform: "youtube",
+      },
+      orderBy: [{ trendingRank: "asc" }, { publishedAt: "desc" }],
+      take: 12 - related.length,
+      select: {
+        id: true,
+        title: true,
+        thumbnailUrl: true,
+        durationSec: true,
+        views: true,
+        publishedAt: true,
+        trendingRank: true,
+      },
+    });
+    related = [...related, ...more];
+  }
+
+  const embedUrl =
+    v.platform === "youtube"
+      ? `https://www.youtube.com/embed/${v.platformVideoId}?rel=0`
+      : v.url;
+
+  return (
+    <main className="mx-auto max-w-7xl px-4 py-6 grid grid-cols-1 lg:grid-cols-12 gap-6">
+      {/* 左：プレイヤー＆メタ */}
+      <article className="lg:col-span-8 space-y-4">
+        <div className="aspect-video rounded-2xl overflow-hidden bg-black">
+          <iframe
+            src={embedUrl}
+            title={v.title}
+            className="w-full h-full"
+            allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
+            allowFullScreen
+          />
+        </div>
+
+        <h1 className="text-xl md:text-2xl font-bold text-zinc-100">{v.title}</h1>
+
+        <div className="flex flex-wrap items-center gap-3 text-sm">
+          <TrendingBadge rank={v.trendingRank ?? null} />
+          <span className="text-zinc-400">公開: {fmtDate(v.publishedAt)}</span>
+          <span className="text-zinc-400">👁 {fmt(v.views)}</span>
+          <span className="text-zinc-400">❤️ {fmt(v.likes)}</span>
+
+          {/* 右寄せ：お気に入り / 共有（クライアント） */}
+          <span className="ml-auto" />
+          <ClientActions videoId={v.id} />
+        </div>
+
+        <div className="text-zinc-300 text-sm">
+          {v.channelTitle && (
+            <div>
+              チャンネル: <span className="font-medium">{v.channelTitle}</span>
+            </div>
+          )}
+          {typeof v.durationSec === "number" && (
+            <div>長さ: {secsToLabel(v.durationSec)}</div>
+          )}
+        </div>
+
+        <div className="pt-2">
+          <Link
+            href="https://docs.google.com/forms/d/e/1FAIpQLSc_report_form"
+            target="_blank"
+            className="text-xs text-zinc-400 underline"
+          >
+            通報・フィードバック
+          </Link>
+        </div>
+      </article>
+
+      {/* 右：関連 */}
+      <aside className="lg:col-span-4">
+        <h2 className="text-sm font-semibold text-zinc-300 mb-2">関連</h2>
+        <div className="grid gap-3">
+          {related.map((r) => (
+            <Link
+              key={r.id}
+              href={`/${r.id}`}
+              prefetch={false}
+              className="flex gap-3 rounded-xl overflow-hidden bg-zinc-900 hover:bg-zinc-800 transition-colors"
+            >
+              <div className="relative w-40 aspect-video bg-zinc-800 shrink-0">
+                {r.thumbnailUrl && (
+                  // eslint-disable-next-line @next/next/no-img-element
+                  <img
+                    src={r.thumbnailUrl}
+                    alt={r.title}
+                    loading="lazy"
+                    className="absolute inset-0 w-full h-full object-cover"
+                  />
+                )}
+                {typeof r.durationSec === "number" && (
+                  <span className="absolute bottom-1 right-1 rounded bg-black/70 text-white text-[10px] px-1">
+                    {secsToLabel(r.durationSec)}
+                  </span>
+                )}
+              </div>
+              <div className="py-2 pr-3 flex-1">
+                <div className="text-[13px] font-medium line-clamp-2 text-zinc-100">
+                  {r.title}
+                </div>
+                <div className="mt-1 text-[11px] text-zinc-400 flex items-center gap-2">
+                  <TrendingBadge rank={r.trendingRank ?? null} />
+                  <span>👁 {fmt(r.views)}</span>
+                  <span>{fmtDate(r.publishedAt)}</span>
+                </div>
+              </div>
+            </Link>
+          ))}
+        </div>
+      </aside>
+    </main>
+  );
 }
