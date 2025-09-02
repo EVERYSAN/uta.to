@@ -5,10 +5,6 @@ import Link from "next/link";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 
-export const dynamic = 'force-dynamic';
-export const revalidate = 0;
-export const fetchCache = 'force-no-store';
-
 /* ===== utils ===== */
 const nf = new Intl.NumberFormat("ja-JP");
 const fmtCount = (n?: number | null) => (typeof n === "number" ? nf.format(n) : "0");
