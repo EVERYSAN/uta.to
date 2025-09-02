@@ -1,63 +1,71 @@
+// src/app/[id]/ClientActions.tsx
 "use client";
 
 import { useEffect, useState } from "react";
 
-export function FavButton({ videoId }: { videoId: string }) {
+export default function ClientActions({ videoId }: { videoId: string }) {
+  return (
+    <div className="flex items-center gap-2">
+      <FavButton videoId={videoId} />
+      <ShareButton />
+    </div>
+  );
+}
+
+function FavButton({ videoId }: { videoId: string }) {
+  const key = "fav:v1";
   const [on, setOn] = useState(false);
 
   useEffect(() => {
-    const raw = localStorage.getItem("favVideos");
-    if (!raw) return;
     try {
-      const set = new Set<string>(JSON.parse(raw));
-      setOn(set.has(videoId));
+      const raw = localStorage.getItem(key);
+      const arr: string[] = raw ? JSON.parse(raw) : [];
+      setOn(arr.includes(videoId));
     } catch {}
   }, [videoId]);
 
   const toggle = () => {
-    const raw = localStorage.getItem("favVideos");
-    const set = new Set<string>(raw ? (JSON.parse(raw) as string[]) : []);
-    if (set.has(videoId)) set.delete(videoId);
-    else set.add(videoId);
-    localStorage.setItem("favVideos", JSON.stringify([...set]));
-    setOn((v) => !v);
+    try {
+      const raw = localStorage.getItem(key);
+      const arr: string[] = raw ? JSON.parse(raw) : [];
+      const i = arr.indexOf(videoId);
+      if (i >= 0) arr.splice(i, 1);
+      else arr.unshift(videoId);
+      localStorage.setItem(key, JSON.stringify(arr.slice(0, 200)));
+      setOn(!on);
+    } catch {}
   };
 
   return (
     <button
       onClick={toggle}
-      className={`rounded-lg px-3 py-1.5 text-sm border ${
-        on
-          ? "border-violet-500 bg-violet-500/10 text-violet-300"
-          : "border-zinc-800 text-zinc-300 hover:bg-zinc-800"
+      className={`px-3 py-1.5 rounded-full text-sm ${
+        on ? "bg-violet-600 text-white" : "bg-zinc-700 text-white hover:bg-zinc-600"
       }`}
-      title="お気に入り"
+      aria-pressed={on}
     >
-      {on ? "★ お気に入り" : "☆ お気に入り"}
+      {on ? "お気に入り済み" : "お気に入り"}
     </button>
   );
 }
 
-export function ShareButton() {
-  const [done, setDone] = useState(false);
+function ShareButton() {
+  const [copied, setCopied] = useState(false);
 
-  const onClick = async () => {
+  const copy = async () => {
     try {
       await navigator.clipboard.writeText(window.location.href);
-      setDone(true);
-      setTimeout(() => setDone(false), 1600);
-    } catch {
-      // 失敗時は無視
-    }
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1200);
+    } catch {}
   };
 
   return (
     <button
-      onClick={onClick}
-      className="rounded-lg border border-zinc-800 px-3 py-1.5 text-sm text-zinc-300 hover:bg-zinc-800"
-      title="リンクをコピー"
+      onClick={copy}
+      className="px-3 py-1.5 rounded-full text-sm bg-zinc-700 text-white hover:bg-zinc-600"
     >
-      {done ? "コピーしました" : "共有"}
+      {copied ? "コピーしました" : "共有リンク"}
     </button>
   );
 }
