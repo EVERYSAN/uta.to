@@ -39,6 +39,8 @@ model Video {
   createdAt        DateTime @default(now())
   updatedAt        DateTime @updatedAt
   metrics          VideoMetric[]
+  supportPoints    Int      @default(0)
+  supports         SupportEvent[]
 
   // 逆方向 relation
   statsSnapshots   StatsSnapshot[]
@@ -72,6 +74,7 @@ model VideoMetric {
   @@unique([videoId, date], name: "videoId_date")
   @@index([date])
 }
+
 
 
 
