@@ -1,83 +1,58 @@
-import { NextRequest, NextResponse } from "next/server";
-import { PrismaClient, Prisma } from "@prisma/client";
+// src/app/api/videos/route.ts
+import { NextResponse } from "next/server";
+import { PrismaClient } from "@prisma/client";
+
+export const dynamic = "force-dynamic";   // APIは毎回実行
+export const revalidate = 0;
 
 const prisma = new PrismaClient();
 
-// 時間範囲のヘルパ
-const RANGE_HOURS: Record<string, number> = {
-  "1d": 24,
-  "7d": 7 * 24,
-  "30d": 30 * 24,
-};
+type Range = "1d" | "7d" | "30d";
+type ShortsMode = "all" | "exclude";
 
-// 数値パース
-const toInt = (v: string | null, def: number) => {
-  const n = v ? parseInt(v, 10) : NaN;
-  return Number.isFinite(n) ? n : def;
-};
+// 取りすぎ→JSで整列→ページング、にすることでWHEREが厳し過ぎて空になる事故を回避
+const FETCH_FACTOR = 3; // 1ページぶんの3倍を取得してから絞る
 
-// 経過時間（時間）
-const ageHours = (d: Date) => (Date.now() - new Date(d).getTime()) / 3600000;
+export async function GET(req: Request) {
+  const url = new URL(req.url);
 
-// トレンドスコア（views と likes が null の場合は 0 扱い）
-const trendScore = (views: number | null, likes: number | null, publishedAt: Date) => {
-  const v = views ?? 0;
-  const l = likes ?? 0;
-  // ざっくり：高評価を強めに重み付け、時間減衰
-  const raw = v + l * 8;
-  return raw / Math.pow(ageHours(publishedAt) + 2, 1.3);
-};
+  // ---- 1) パラメータ安全に解釈 ----
+  const range = (["1d", "7d", "30d"].includes(url.searchParams.get("range") || "") 
+    ? (url.searchParams.get("range") as Range)
+    : "1d");
 
-export async function GET(req: NextRequest) {
-  const sp = req.nextUrl.searchParams;
+  const shorts = (["all", "exclude"].includes(url.searchParams.get("shorts") || "") 
+    ? (url.searchParams.get("shorts") as ShortsMode)
+    : "all");
 
-  const q = (sp.get("q") ?? "").trim();
-  const sort = sp.get("sort") ?? "trending";          // 将来拡張用（今は "trending" 前提）
-  const range = sp.get("range") ?? "1d";               // 1d | 7d | 30d
-  const shorts = (sp.get("shorts") ?? "all") as "all" | "exclude"; // すべて / ショート除外
-  const page = Math.max(1, toInt(sp.get("page"), 1));
-  const take = Math.min(50, Math.max(1, toInt(sp.get("take"), 50)));
+  const page = Math.max(1, parseInt(url.searchParams.get("page") || "1", 10) || 1);
+  const take = Math.min(100, Math.max(1, parseInt(url.searchParams.get("take") || "24", 10) || 24));
 
-  const hours = RANGE_HOURS[range] ?? 24;
-  const since = new Date(Date.now() - hours * 3600 * 1000);
+  // ---- 2) 期間の算出（UTC基準のローリング窓）----
+  const hours = range === "7d" ? 7 * 24 : range === "30d" ? 30 * 24 : 24;
+  const now = Date.now();
+  const since = new Date(now - hours * 3600_000);
 
-  // 基本の where
-  let where: Prisma.VideoWhereInput = {
+  // ---- 3) WHERE 条件（ショート除外は安全側に二段）----
+  const whereBase: any = {
     platform: "youtube",
-    publishedAt: { gte: since },
+    publishedAt: { gte: since },          // ローリング
   };
 
-  // キーワード
-  if (q.length > 0) {
-    where = {
-      AND: [
-        where,
-        {
-          OR: [
-            { title: { contains: q, mode: "insensitive" } },
-            { description: { contains: q, mode: "insensitive" } },
-            { channelTitle: { contains: q, mode: "insensitive" } },
-          ],
-        },
-      ],
-    };
-  }
+  // durationSec が null の古いデータでも落ちないように、「60秒超」or「shorts ではない」のOR
+  const notShorts = {
+    OR: [
+      { durationSec: { gt: 60 } },
+      { url: { not: { contains: "/shorts/" } } },
+    ],
+  };
+  const where = shorts === "exclude" ? { AND: [whereBase, notShorts] } : whereBase;
 
-  // 「ショート除外」= 61秒〜5分の範囲に絞る
-  if (shorts === "exclude") {
-    where = {
-      AND: [
-        where,
-        {
-          durationSec: { gte: 61, lte: 300 },
-        },
-      ],
-    };
-  }
-
-  // まず候補を多めに取得（最大 500）してから JS 側でトレンド順に並べ替える
-  const candidates = await prisma.video.findMany({
+  // ---- 4) まずは多めに取得（views降順=安定で速い）, あとで JS 側で順位付け ----
+  const raw = await prisma.video.findMany({
     where,
+    orderBy: [{ views: "desc" }],         // 安全・高速なソート（最終スコアは後段で再計算）
+    take: take * FETCH_FACTOR,
     select: {
       id: true,
       platform: true,
@@ -88,34 +63,59 @@ export async function GET(req: NextRequest) {
       durationSec: true,
       publishedAt: true,
       channelTitle: true,
-      views: true,   // null 可
-      likes: true,   // null 可
+      views: true,
+      likes: true,
     },
-    orderBy: { publishedAt: "desc" }, // 安定化のため一度日時で並べる
-    take: 500,
   });
 
-  // トレンドスコア算出＆安定化ソート
-  const ranked = candidates
-    .map(v => ({
-      ...v,
-      _score: trendScore(v.views, v.likes, v.publishedAt),
-    }))
-    .sort((a, b) =>
-      b._score - a._score ||
-      new Date(b.publishedAt).getTime() - new Date(a.publishedAt).getTime() ||
-      a.id.localeCompare(b.id)
-    );
+  // 足りないときの保険：期間を少しだけ広げて補充（最大 +24h）
+  let rows = raw;
+  if (rows.length < take) {
+    const sinceWider = new Date(since.getTime() - 24 * 3600_000);
+    const extra = await prisma.video.findMany({
+      where: { ...where, publishedAt: { gte: sinceWider } },
+      orderBy: [{ views: "desc" }],
+      take: take * FETCH_FACTOR,
+      select: {
+        id: true, platform: true, platformVideoId: true, title: true, url: true,
+        thumbnailUrl: true, durationSec: true, publishedAt: true,
+        channelTitle: true, views: true, likes: true,
+      },
+    });
+    // 重複排除
+    const map = new Map<string, any>();
+    [...rows, ...extra].forEach(v => map.set(v.id, v));
+    rows = [...map.values()];
+  }
 
-  const total = ranked.length;
+  // ---- 5) トレンドスコアを計算して安定ソート ----
+  //   - 閲覧と高評価の合成
+  //   - 公開直後バイアスを抑えるため時間減衰（+2h バッファ）
+  //   - 数値が欠けても 0 として安全に扱う
+  const withScore = rows.map((v) => {
+    const views = Number(v.views || 0);
+    const likes = Number(v.likes || 0);
+    const published = v.publishedAt ? new Date(v.publishedAt).getTime() : now;
+    const ageHours = Math.max(0, (now - published) / 3600_000);
+
+    // 好みで調整可：likes をやや強め、時間減衰は1.3乗
+    const score = (views + 4 * likes) / Math.pow(ageHours + 2, 1.3);
+    return { ...v, trendingScore: score };
+  });
+
+  withScore.sort((a, b) => (b.trendingScore! - a.trendingScore!));
+
+  // ランク付け
+  withScore.forEach((v, i) => (v as any).trendingRank = i + 1);
+
+  // ---- 6) ページング（JS側で安全に）----
+  const total = withScore.length;
   const start = (page - 1) * take;
-  const items = ranked.slice(start, start + take).map(({ _score, ...rest }) => rest);
+  const items = withScore.slice(start, start + take);
 
-  return NextResponse.json({
-    ok: true,
-    total,
-    page,
-    take,
-    items,
-  });
+  // ---- 7) レスポンス（no-store）----
+  return NextResponse.json(
+    { ok: true, items, page, take, total },
+    { headers: { "Cache-Control": "no-store, no-cache, max-age=0" } }
+  );
 }
