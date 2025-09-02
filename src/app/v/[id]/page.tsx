@@ -3,6 +3,14 @@ import { PrismaClient } from "@prisma/client";
 import { notFound } from "next/navigation";
 import Link from "next/link";
 import ClientBits from "./ClientBits";
+import YouTubeLite from '@/components/YouTubeLite';
+
+export default function VideoPage({ params }: { params: { id: string } }) {
+  return (
+    <main className="p-4">
+      <YouTubeLite id={params.id} title="歌ってみた" />
+    </main>
+  );
 
 export const dynamic = "force-dynamic"; // 常に最新
 
