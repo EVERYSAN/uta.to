@@ -2,7 +2,7 @@
 const YT_API_KEY = process.env.YT_API_KEY!;
 const YT_BASE = "https://www.googleapis.com/youtube/v3";
 
-type RawVideo = {
+export type RawVideo = {
   id: string;
   title: string;
   channelTitle?: string | null;
@@ -16,7 +16,6 @@ type RawVideo = {
 
 function parseISODurationToSec(iso?: string | null): number | null {
   if (!iso) return null;
-  // PTxHxMxS
   const m = /^PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?$/i.exec(iso);
   if (!m) return null;
   const h = parseInt(m[1] || "0", 10);
@@ -26,14 +25,14 @@ function parseISODurationToSec(iso?: string | null): number | null {
 }
 
 /**
- * 直近公開動画を search→videos で解決して返す
+ * (A) 直近公開動画を search→videos で解決して返す
  */
 export async function fetchRecentYouTube(params: {
-  publishedAfterISO: string;     // 例: new Date(Date.now()-24h).toISOString()
-  maxPages?: number;             // ページ上限
-  maxItems?: number;             // 件数上限
-  regionCode?: string;           // 'JP' 推奨
-  query?: string;                // 任意キーワード
+  publishedAfterISO: string;
+  maxPages?: number;
+  maxItems?: number;
+  regionCode?: string;
+  query?: string;
 }) {
   if (!YT_API_KEY) throw new Error("YT_API_KEY is not set");
   const {
@@ -75,33 +74,8 @@ export async function fetchRecentYouTube(params: {
       continue;
     }
 
-    const vidsURL = new URL(`${YT_BASE}/videos`);
-    vidsURL.searchParams.set("key", YT_API_KEY);
-    vidsURL.searchParams.set("part", "snippet,contentDetails,statistics");
-    vidsURL.searchParams.set("id", ids.join(","));
-
-    const vres = await fetch(vidsURL.toString());
-    if (!vres.ok) throw new Error(`YouTube videos failed: ${vres.status}`);
-    const vjson = await vres.json();
-
-    for (const v of vjson.items || []) {
-      const id = v.id;
-      const sn = v.snippet || {};
-      const st = v.statistics || {};
-      const cd = v.contentDetails || {};
-
-      out.push({
-        id,
-        title: sn.title,
-        channelTitle: sn.channelTitle ?? null,
-        url: `https://www.youtube.com/watch?v=${id}`,
-        thumbnailUrl: sn.thumbnails?.medium?.url || sn.thumbnails?.default?.url || null,
-        publishedAt: sn.publishedAt,
-        durationSec: parseISODurationToSec(cd.duration),
-        views: st.viewCount != null ? Number(st.viewCount) : null,
-        likes: st.likeCount != null ? Number(st.likeCount) : null,
-      });
-    }
+    const details = await fetchDetails(ids);
+    out.push(...details);
 
     pageToken = sjson.nextPageToken;
     if (!pageToken) break;
@@ -110,14 +84,25 @@ export async function fetchRecentYouTube(params: {
   return { items: out.slice(0, maxItems) };
 }
 
-/** いわゆる“直近N時間”ぶんをまとめて取るヘルパ */
-export async function fetchRecentYouTubeSinceHours(hours = 24, opts?: { query?: string; regionCode?: string; limit?: number }) {
-  const since = new Date(Date.now() - hours * 3600_000).toISOString();
-  return fetchRecentYouTube({
-    publishedAfterISO: since,
-    maxPages: 10,
-    maxItems: opts?.limit ?? 200,
-    regionCode: opts?.regionCode ?? "JP",
-    query: opts?.query,
-  });
-}
+/**
+ * (B) “動画IDの配列”から詳細情報を取得（/videos）
+ *    他のAPIから呼ばれている想定の fetchDetails を提供
+ */
+export async function fetchDetails(videoIds: string[]): Promise<RawVideo[]> {
+  if (!YT_API_KEY) throw new Error("YT_API_KEY is not set");
+  const out: RawVideo[] = [];
+  // /videos は一度に最大50件
+  for (let i = 0; i < videoIds.length; i += 50) {
+    const chunk = videoIds.slice(i, i + 50);
+    const vidsURL = new URL(`${YT_BASE}/videos`);
+    vidsURL.searchParams.set("key", YT_API_KEY);
+    vidsURL.searchParams.set("part", "snippet,contentDetails,statistics");
+    vidsURL.searchParams.set("id", chunk.join(","));
+
+    const vres = await fetch(vidsURL.toString());
+    if (!vres.ok) throw new Error(`YouTube videos failed: ${vres.status}`);
+    const vjson = await vres.json();
+
+    for (const v of vjson.items || []) {
+      const id = v.id;
+      const sn
