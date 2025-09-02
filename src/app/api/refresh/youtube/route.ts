@@ -1,123 +1,105 @@
-// src/app/api/refresh/youtube/route.ts
 import { NextResponse } from "next/server";
-import { Prisma, type Video } from "@prisma/client";
-import { prisma } from "@/lib/prisma"; // ← ルート内で new せず、lib から import
-import { fetchDetails } from "@/lib/youtube";
+import { PrismaClient } from "@prisma/client";
+import { fetchDetails, type RawVideo } from "@/lib/youtube";
 
-// これらの export は Next.js で許可されている
-export const runtime = "nodejs";
-export const dynamic = "force-dynamic";
-export const preferredRegion = "sin1";
+const prisma = new PrismaClient();
 
-function parseIdsFromURL(url: string): string[] {
-  const sp = new URL(url).searchParams;
-  const idsRaw = sp.get("ids");
-  if (!idsRaw) return [];
-  return idsRaw
-    .split(",")
-    .map((s) => s.trim())
-    .filter(Boolean)
-    .slice(0, 50); // 念のため上限
-}
-
-function safeThumb(v: any): string | undefined {
-  const sn = v?.snippet;
-  const t = sn?.thumbnails;
-  return (
-    v?.thumbnailUrl ||
-    t?.maxres?.url ||
-    t?.standard?.url ||
-    t?.high?.url ||
-    t?.medium?.url ||
-    t?.default?.url ||
-    undefined
-  );
-}
-
+/**
+ * /api/refresh/youtube?ids=aaa,bbb,ccc
+ * - YouTube の詳細を取り直して Video テーブルを upsert
+ * - 既存レコードは title/thumbnail/url/duration/channelTitle/views/likes/publishedAt を更新
+ * - 作成時は必須の title / url を必ず補完して渡す
+ */
 export async function GET(req: Request) {
   try {
-    const ids = parseIdsFromURL(req.url);
+    const { searchParams } = new URL(req.url);
+    const idsParam = searchParams.get("ids");
+
+    if (!idsParam) {
+      return NextResponse.json({ ok: false, error: "required: ids" }, { status: 400 });
+    }
+
+    const ids = idsParam
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean);
+
     if (ids.length === 0) {
       return NextResponse.json({ ok: false, error: "required: ids" }, { status: 400 });
     }
 
-    // YouTube 詳細を取得
-    const items = await fetchDetails(ids);
+    // 取得
+    const videos: RawVideo[] = await fetchDetails(ids);
 
     let upserts = 0;
-    const results: Pick<Video, "id" | "platform" | "platformVideoId">[] = [];
+    let skippedNoId = 0;
+    let skippedNoPub = 0;
 
-    for (const it of items) {
+    for (const it of videos) {
+      // RawVideo には platformVideoId は無い。contentDetails.videoId または id から導出する
       const platform = "youtube";
-      const platformVideoId =
-        it.platformVideoId ?? it.id ?? it.contentDetails?.videoId ?? "";
+      const platformVideoId = it.contentDetails?.videoId ?? it.id ?? "";
 
-      if (!platformVideoId) continue;
+      if (!platformVideoId) {
+        skippedNoId++;
+        continue;
+      }
 
-      const title = (it.title ?? it.snippet?.title ?? "").trim();
-      const safeTitle = title || `video ${platformVideoId}`;
+      // 文字列は素のまま、日時は Date に正規化
+      const publishedAt = it.publishedAt ? new Date(it.publishedAt) : undefined;
 
-      const url = it.url ?? `https://www.youtube.com/watch?v=${platformVideoId}`;
-      const thumbnailUrl = safeThumb(it);
-      const channelTitle = it.channelTitle ?? it.snippet?.channelTitle ?? "";
+      // update 用は「あるものだけ」キー追加（undefined を渡さない）
+      const updateData: Record<string, any> = {};
+      if (it.title != null) updateData.title = it.title;
+      if (it.thumbnailUrl != null) updateData.thumbnailUrl = it.thumbnailUrl;
+      if (it.url != null) updateData.url = it.url;
+      if (it.durationSec != null) updateData.durationSec = it.durationSec;
+      if (it.channelTitle != null) updateData.channelTitle = it.channelTitle;
+      if (it.views != null) updateData.views = it.views;
+      if (it.likes != null) updateData.likes = it.likes;
+      if (publishedAt) updateData.publishedAt = publishedAt;
 
-      // publishedAt は必須。なければ now を入れて型を満たす
-      const pubInput = it.publishedAt ?? it.snippet?.publishedAt ?? null;
-      const publishedAt: Date = pubInput ? new Date(pubInput) : new Date();
+      // create 用は必須フィールドを必ず与える（title / url）
+      // どちらか欠ける場合は安全なデフォルトを補完
+      const safeTitle = it.title ?? `video ${platformVideoId}`;
+      const safeUrl =
+        it.url ?? `https://www.youtube.com/watch?v=${platformVideoId}`;
 
-      // 任意（schema では optional）
-      const durationSec =
-        typeof it.durationSec === "number" ? it.durationSec : undefined;
-      const views =
-        typeof it.views === "number" ? it.views : undefined;
-      const likes =
-        typeof it.likes === "number" ? it.likes : undefined;
-
-      // ★ create は Prisma.VideoCreateInput を“必須フィールドを確実に”満たす形で明示的に構築
-      const createData: Prisma.VideoCreateInput = {
+      const createData: Record<string, any> = {
         platform,
         platformVideoId,
-        title: safeTitle,         // required
-        url,                      // required
-        publishedAt,              // required
-        // optional
-        thumbnailUrl,
-        durationSec,
-        channelTitle,             // schemaで@default("")なので未指定でも良いが、入れておく
-        views,
-        likes,
-        rawJson: it as any,
-      };
-
-      // ★ update は Prisma.VideoUpdateInput で OK（全て optional 扱い）
-      const updateData: Prisma.VideoUpdateInput = {
         title: safeTitle,
-        url,
-        publishedAt, // まれに変わる可能性があるため上書き許容
-        thumbnailUrl,
-        durationSec,
-        channelTitle,
-        views,
-        likes,
-        rawJson: it as any,
+        url: safeUrl,
       };
+      if (it.thumbnailUrl != null) createData.thumbnailUrl = it.thumbnailUrl;
+      if (it.durationSec != null) createData.durationSec = it.durationSec;
+      if (it.channelTitle != null) createData.channelTitle = it.channelTitle;
+      if (it.views != null) createData.views = it.views;
+      if (it.likes != null) createData.likes = it.likes;
+      if (publishedAt) createData.publishedAt = publishedAt;
 
-      const row = await prisma.video.upsert({
+      await prisma.video.upsert({
         where: { platform_platformVideoId: { platform, platformVideoId } },
-        create: createData,
-        update: updateData,
-        select: { id: true, platform: true, platformVideoId: true },
+        create: createData, // ← create にはプリミティブ確定値のみ
+        update: updateData, // ← update は存在するキーだけ
       });
 
-      results.push(row);
       upserts++;
     }
 
-    return NextResponse.json({ ok: true, requested: ids.length, fetched: items.length, upserts, results });
+    return NextResponse.json({
+      ok: true,
+      requested: ids.length,
+      fetched: videos.length,
+      upserts,
+      skippedNoId,
+      skippedNoPub, // いまは未使用だが将来用
+    });
   } catch (err: any) {
-    // 型安全に NextResponse を返す
+    const message =
+      (err && (err.message || err.toString())) || "unknown error";
     return NextResponse.json(
-      { ok: false, error: err?.message ?? "unknown error" },
+      { ok: false, error: message },
       { status: 500 }
     );
   }
