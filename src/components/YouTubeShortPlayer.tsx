@@ -1,3 +1,4 @@
+"use client";
 // src/components/YouTubeShortPlayer.tsx
 import React from "react";
 
