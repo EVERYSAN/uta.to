@@ -152,7 +152,7 @@ export default async function VideoDetailPage({ params }: Params) {
         <div className="aspect-video rounded-2xl overflow-hidden bg-black">
           {v.platform === 'youtube' ? (
             ytId ? (
-              <YouTubeLite id={ytId} title={v.title ?? 'video'} />
+              <YouTubeLite idOrUrl={ytId} title={v.title ?? 'video'} />
             ) : (
               // IDが取れない場合のフォールバック
               <div className="w-full h-full grid place-items-center bg-zinc-900 text-zinc-200">
