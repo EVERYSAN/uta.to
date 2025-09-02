@@ -1,14 +1,12 @@
-// src/app/api/trending/route.ts
 import { NextResponse } from "next/server";
 import { PrismaClient } from "@prisma/client";
 
-export const dynamic = "force-dynamic";   // 毎回サーバで実行
-export const revalidate = 0;              // CDN/ISR キャッシュ無効
+export const dynamic = "force-dynamic";
+export const revalidate = 0;
 
 const prisma = new PrismaClient();
 
 type Range = "24h" | "7d" | "30d";
-type Shorts = "all" | "exclude";
 type Sort = "trending" | "views" | "likes";
 
 const hoursOf = (r: Range) => (r === "7d" ? 7 * 24 : r === "30d" ? 30 * 24 : 24);
@@ -16,14 +14,16 @@ const hoursOf = (r: Range) => (r === "7d" ? 7 * 24 : r === "30d" ? 30 * 24 : 24)
 export async function GET(req: Request) {
   const url = new URL(req.url);
 
-  // ---- パラメータ（安全に既定値にフォールバック）----
+  // --- パラメータ（互換性のため両取り） ---
   const range = (["24h", "7d", "30d"].includes(url.searchParams.get("range") || "")
     ? (url.searchParams.get("range") as Range)
     : "24h");
 
-  const shorts = (["all", "exclude"].includes(url.searchParams.get("shorts") || "")
-    ? (url.searchParams.get("shorts") as Shorts)
-    : "all");
+  // shorts=exclude も excludeShorts=true/1 も受ける
+  const shortsParam = (url.searchParams.get("shorts") || "").toLowerCase();
+  const excludeShortsFlag =
+    shortsParam === "exclude" ||
+    /^(1|true|yes)$/i.test(url.searchParams.get("excludeShorts") || "");
 
   const sort = (["trending", "views", "likes"].includes(url.searchParams.get("sort") || "")
     ? (url.searchParams.get("sort") as Sort)
@@ -32,36 +32,39 @@ export async function GET(req: Request) {
   const page = Math.max(1, Number(url.searchParams.get("page") || "1") || 1);
   const take = Math.min(100, Math.max(1, Number(url.searchParams.get("take") || "24") || 24));
 
-  // ---- 厳密ローリング窓（UTC基準・拡張窓は使わない）----
+  // --- 厳密ローリング窓（UTC） ---
   const now = Date.now();
   const since = new Date(now - hoursOf(range) * 3600_000);
 
-  // ---- WHERE（ショート除外は NOT(…OR…) で厳密に）----
+  // --- WHERE（ショート除外ロジックを堅牢化） ---
+  // ポイント：
+  //  - durationSec は「取得済みかつ >0 のときだけ」短尺判定に使う
+  //  - URL / platformVideoId に '/shorts/' を含むものは短尺扱い
   const baseWhere: any = {
     platform: "youtube",
     publishedAt: { gte: since },
   };
 
-  const excludeShorts =
-    shorts === "exclude"
-      ? {
-          NOT: {
-            OR: [
-              { durationSec: { lte: 60 } },               // 60秒以下
-              { url: { contains: "/shorts/" } },          // URLにshorts
-              { platformVideoId: { contains: "/shorts/" } },
-            ],
-          },
-        }
-      : {};
+  const excludeShortsWhere = excludeShortsFlag
+    ? {
+        NOT: {
+          OR: [
+            // durationSec が取得済み（>0）の場合のみ 60秒以下を短尺とみなす
+            { AND: [{ durationSec: { gt: 0 } }, { durationSec: { lte: 60 } }] },
+            { url: { contains: "/shorts/" } },
+            { platformVideoId: { contains: "/shorts/" } },
+          ],
+        },
+      }
+    : {};
 
-  const where = { AND: [baseWhere, excludeShorts] };
+  const where = { AND: [baseWhere, excludeShortsWhere] };
 
-  // ---- 取得（まずは views 降順で多めに。あとで安定化）----
+  // --- 取得（views desc で多め） ---
   const rows = await prisma.video.findMany({
     where,
     orderBy: [{ views: "desc" }],
-    take: take * 2, // 同率ソートの揺れ用に少し多め
+    take: take * 2,
     select: {
       id: true,
       platform: true,
@@ -77,7 +80,7 @@ export async function GET(req: Request) {
     },
   });
 
-  // ---- トレンドスコア計算（公開直後バイアスを抑える軽量式）----
+  // --- トレンドスコア（軽量） ---
   const scored = rows.map((v) => {
     const views = Number(v.views || 0);
     const likes = Number(v.likes || 0);
@@ -87,7 +90,6 @@ export async function GET(req: Request) {
     return { ...v, trendingScore };
   });
 
-  // ---- 並び替え ----
   if (sort === "views") {
     scored.sort((a, b) => Number(b.views || 0) - Number(a.views || 0));
   } else if (sort === "likes") {
@@ -97,11 +99,11 @@ export async function GET(req: Request) {
   }
   scored.forEach((v, i) => ((v as any).trendingRank = i + 1));
 
-  // ---- ページング ----
+  // --- ページング ---
   const start = (page - 1) * take;
   const items = scored.slice(start, start + take);
 
-  // ---- レスポンス（no-store）----
+  // --- レスポンス ---
   return NextResponse.json(
     {
       ok: true,
@@ -109,7 +111,10 @@ export async function GET(req: Request) {
       page,
       take,
       total: scored.length,
-      window: { range, since: since.toISOString() }, // デバッグ確認に便利
+      window: { range, since: since.toISOString() },
+      params: {
+        excludeShorts: excludeShortsFlag,
+      },
     },
     { headers: { "Cache-Control": "no-store, no-cache, max-age=0" } }
   );
