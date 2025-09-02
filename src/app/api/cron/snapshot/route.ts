@@ -1,54 +1,92 @@
+// src/app/api/cron/snapshot/route.ts
+export const dynamic = "force-dynamic";
 
-import { prisma } from "@/lib/prisma";
-import type { NextRequest } from "next/server";
-import { NextResponse } from "next/server"; // 使っている場合のみ
+import { PrismaClient } from "@prisma/client";
+import { fetchRecentYouTubeSinceHours } from "@/lib/youtube";
 
-function startOfUTC(d: Date) {
-  return new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate(), 0, 0, 0, 0));
-};
+const prisma = new PrismaClient();
 
-function isAuthorized(req: NextRequest) {
-  const q = req.nextUrl.searchParams.get("secret");
-  const h = req.headers.get("x-cron-secret");
-  if (q && q === process.env.CRON_SECRET) return true;
-  if (h && h === process.env.CRON_SECRET) return true;
-  if (req.headers.get("x-vercel-cron") === "1") return true;
-  return false;
-};
-/**
- * 使い方:
- * /api/cron/snapshot            -> 当日(UTC) 00:00 で upsert
- * /api/cron/snapshot?date=2025-06-01
- * /api/cron/snapshot?take=500&cursor=<id>
- */
-export async function GET(req: NextRequest) {
-  const { searchParams } = new URL(req.url);
+function authorized(req: Request) {
+  const u = new URL(req.url);
+  const s = process.env.CRON_SECRET ?? "";
+  const ua = req.headers.get("user-agent") || "";
+  return (
+    req.headers.get("x-vercel-cron") !== null ||
+    /vercel-cron/i.test(ua) ||
+    req.headers.get("authorization")?.replace(/^Bearer\s+/i, "") === s ||
+    u.searchParams.get("secret") === s
+  );
+}
 
-  const take = Math.min(1000, Math.max(1, parseInt(searchParams.get("take") ?? "500", 10)));
-  const cursor = searchParams.get("cursor") ?? undefined;
+export async function GET(req: Request) {
+  if (!authorized(req)) return new Response("Unauthorized", { status: 401 });
+  const t0 = Date.now();
 
-  const dateStr = searchParams.get("date"); // YYYY-MM-DD（UTC）
-  const targetDate = dateStr ? new Date(`${dateStr}T00:00:00.000Z`) : startOfUTC(new Date());
+  // パラメータ（手動Run時に上書きできるように）
+  const url = new URL(req.url);
+  const hours = Math.min(72, Math.max(6, Number(url.searchParams.get("sinceHours") || "48") || 48));
+  const limit = Math.min(500, Math.max(50, Number(url.searchParams.get("limit") || "300") || 300));
+  const query = url.searchParams.get("q") || undefined; // 例: "歌ってみた"
 
-  const videos = await prisma.video.findMany({
-    select: { id: true, views: true, likes: true },
-    take,
-    ...(cursor ? { skip: 1, cursor: { id: cursor } } : {}),
-    orderBy: { id: "asc" },
-  });
+  // 直近公開の取得
+  const { items } = await fetchRecentYouTubeSinceHours(hours, { limit, query });
 
-  for (const v of videos) {
-    await prisma.videoMetric.upsert({
-      where: { videoId_date: { videoId: v.id, date: targetDate } },
-      create: { videoId: v.id, date: targetDate, views: v.views ?? 0, likes: v.likes ?? 0 },
-      update: { views: v.views ?? 0, likes: v.likes ?? 0 },
-    });
+  let upserts = 0, errors: string[] = [];
+  const now = new Date();
+
+  for (const r of items) {
+    try {
+      const platform = "youtube"; // 小文字に正規化
+      const platformVideoId = r.id;
+      const publishedAt = r.publishedAt ? new Date(r.publishedAt) : null;
+
+      await prisma.video.upsert({
+        where: { platform_platformVideoId: { platform, platformVideoId } },
+        update: {
+          title: r.title ?? null,
+          url: r.url ?? `https://www.youtube.com/watch?v=${platformVideoId}`,
+          thumbnailUrl: r.thumbnailUrl ?? null,
+          durationSec: r.durationSec ?? null,
+          publishedAt,
+          channelTitle: r.channelTitle ?? null,
+          views: r.views ?? null,
+          likes: r.likes ?? null,
+        },
+        create: {
+          platform,
+          platformVideoId,
+          title: r.title ?? null,
+          url: r.url ?? `https://www.youtube.com/watch?v=${platformVideoId}`,
+          thumbnailUrl: r.thumbnailUrl ?? null,
+          durationSec: r.durationSec ?? null,
+          publishedAt,
+          channelTitle: r.channelTitle ?? null,
+          views: r.views ?? null,
+          likes: r.likes ?? null,
+          createdAt: now, // 入荷時刻
+        },
+        select: { id: true },
+      });
+
+      upserts++;
+    } catch (e: any) {
+      errors.push(String(e));
+    }
   }
 
-  return NextResponse.json({
-    ok: true,
-    date: targetDate.toISOString().slice(0, 10),
-    count: videos.length,
-    nextCursor: videos.length === take ? videos[videos.length - 1].id : null,
+  // 診断JSON
+  const latest = await prisma.video.findFirst({
+    orderBy: [{ publishedAt: "desc" }],
+    select: { publishedAt: true, createdAt: true, platform: true },
   });
+
+  return Response.json({
+    ok: true,
+    params: { hours, limit, query },
+    fetched: items.length,
+    upserts,
+    latest,
+    tookMs: Date.now() - t0,
+    errors: errors.length ? errors.slice(0, 3) : undefined,
+  }, { headers: { "Cache-Control": "no-store" } });
 }
