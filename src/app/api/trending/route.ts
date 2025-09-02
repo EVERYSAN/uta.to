@@ -10,6 +10,9 @@ const prisma = new PrismaClient();
 type Range = "24h" | "7d" | "30d";
 const hoursOf = (r: Range) => (r === "7d" ? 7 * 24 : r === "30d" ? 30 * 24 : 24);
 
+// 補完の上限（空を避けるため最大72hまで広げる）
+const FALLBACK_STEPS_HOURS = [0, 24, 48]; // 0=そのまま, 次に+24h(=48h窓), 次に+48h(=72h窓)
+
 export async function GET(req: Request) {
   const url = new URL(req.url);
 
@@ -27,38 +30,65 @@ export async function GET(req: Request) {
 
   const page = Math.max(1, Number(url.searchParams.get("page") || "1") || 1);
   const take = Math.min(100, Math.max(1, Number(url.searchParams.get("take") || "24") || 24));
+
   const debug = url.searchParams.has("debug");
+  const noFallback = url.searchParams.has("noFallback");
 
-  // --- rolling window (UTC) ---
+  // --- base window (UTC) ---
   const now = Date.now();
-  const since = new Date(now - hoursOf(range) * 3600_000);
+  const baseHours = hoursOf(range);
+  const baseSince = new Date(now - baseHours * 3600_000);
 
-  // --- filters ---
-  const baseWhere: any = {
-    platform: "youtube",
-    publishedAt: { gte: since },
+  // --- WHERE ビルダー（sinceと除外条件を注入） ---
+  const buildWhere = (since: Date) => {
+    const baseWhere: any = {
+      platform: "youtube",
+      publishedAt: { gte: since },
+    };
+    const excludeShortsWhere = excludeShorts
+      ? {
+          NOT: {
+            OR: [
+              // 未取得(durationSec<=0/null)は短尺扱いしない
+              { AND: [{ durationSec: { gt: 0 } }, { durationSec: { lte: 60 } }] },
+              { url: { contains: "/shorts/" } },
+              { platformVideoId: { contains: "/shorts/" } },
+            ],
+          },
+        }
+      : {};
+    return { AND: [baseWhere, excludeShortsWhere] };
   };
 
-  // 未取得の durationSec は短尺扱いしない
-  const excludeShortsWhere = excludeShorts
-    ? {
-        NOT: {
-          OR: [
-            { AND: [{ durationSec: { gt: 0 } }, { durationSec: { lte: 60 } }] },
-            { url: { contains: "/shorts/" } },
-            { platformVideoId: { contains: "/shorts/" } },
-          ],
-        },
-      }
-    : {};
+  // --- 24h 基準の件数（診断用に必ず計測） ---
+  const counts24h = {
+    baseAllPlatforms: await prisma.video.count({ where: { publishedAt: { gte: baseSince } } }),
+    baseYouTube: await prisma.video.count({ where: { publishedAt: { gte: baseSince }, platform: "youtube" as any } }),
+  };
 
-  const where = { AND: [baseWhere, excludeShortsWhere] };
+  // --- フォールバック窓の決定（noFallback のときは 24h 固定）---
+  let effectiveSince = baseSince;
+  let effectiveHours = baseHours;
+
+  if (!noFallback) {
+    for (const step of FALLBACK_STEPS_HOURS) {
+      const trySince = new Date(baseSince.getTime() - step * 3600_000);
+      const c = await prisma.video.count({ where: buildWhere(trySince) });
+      if (c > 0) {
+        effectiveSince = trySince;
+        effectiveHours = baseHours + step;
+        break;
+      }
+    }
+  }
+
+  const where = buildWhere(effectiveSince);
 
   // =========================
-  // Debug: counts / sample / version
+  // Debug: 24h と 実効窓 の両方を返す
   // =========================
   if (debug) {
-    // 1) DB時刻とサーバ時刻
+    // DB/サーバ時刻
     let dbNowISO = "";
     try {
       const [row]: any = await prisma.$queryRaw`select now() as now`;
@@ -67,116 +97,72 @@ export async function GET(req: Request) {
       dbNowISO = new Date().toISOString();
     }
 
-    // 2) 直近件数（全PF / YouTube系）
-    const baseAllPlatforms = await prisma.video.count({
-      where: { publishedAt: { gte: since } },
-    });
-
-    let baseYouTubeInsensitive = 0;
-    try {
-      baseYouTubeInsensitive = await prisma.video.count({
-        where: {
-          publishedAt: { gte: since },
-          platform: { in: ["youtube", "YouTube", "YOUTUBE"] as any },
-        },
-      });
-    } catch {
-      // enum 等で in が使えない場合のフォールバック
-      baseYouTubeInsensitive = await prisma.video.count({
-        where: { publishedAt: { gte: since }, platform: "youtube" as any },
-      });
-    }
-
-    // 3) ショート判定の各要素
-    const shortByDur = await prisma.video.count({
+    // ショート要素（24h基準で）
+    const shortByDur24h = await prisma.video.count({
       where: {
         AND: [
-          { publishedAt: { gte: since } },
+          { publishedAt: { gte: baseSince } },
           { AND: [{ durationSec: { gt: 0 } }, { durationSec: { lte: 60 } }] },
         ],
       },
     });
-    const shortByUrl = await prisma.video.count({
+    const shortByUrl24h = await prisma.video.count({
       where: {
         AND: [
-          { publishedAt: { gte: since } },
-          {
-            OR: [
-              { url: { contains: "/shorts/" } },
-              { platformVideoId: { contains: "/shorts/" } },
-            ],
-          },
+          { publishedAt: { gte: baseSince } },
+          { OR: [{ url: { contains: "/shorts/" } }, { platformVideoId: { contains: "/shorts/" } }] },
         ],
       },
     });
-    const durNull = await prisma.video.count({
+    const durNull24h = await prisma.video.count({
       where: {
-        AND: [
-          { publishedAt: { gte: since } },
-          { OR: [{ durationSec: null }, { durationSec: 0 }] },
-        ],
+        AND: [{ publishedAt: { gte: baseSince } }, { OR: [{ durationSec: null }, { durationSec: 0 }] }],
       },
     });
 
-    // 4) 実際の where での件数
-    const afterShorts = await prisma.video.count({ where });
+    // 実効 where での件数
+    const afterShortsEffective = await prisma.video.count({ where });
 
-    // 5) プラットフォーム分布
+    // プラットフォーム分布（全体）
     let platforms: any[] = [];
     try {
       platforms = await prisma.$queryRaw<any[]>`
         select coalesce(platform,'(null)') as platform, count(*)::int as count
         from "Video" group by platform order by count desc limit 10
       `;
-    } catch {
-      /* ignore */
-    }
+    } catch {}
 
-    // 6) DBの最新1件
+    // DB最新
     const latest = await prisma.video.findFirst({
       orderBy: [{ publishedAt: "desc" }],
       select: {
-        id: true,
-        title: true,
-        platform: true,
-        publishedAt: true,
-        durationSec: true,
-        url: true,
-        platformVideoId: true,
-        views: true,
-        likes: true,
+        id: true, title: true, platform: true, publishedAt: true, durationSec: true,
+        url: true, platformVideoId: true, views: true, likes: true,
       },
     });
 
-    // 7) 現在の条件でのサンプル
+    // 実効条件のサンプル
     const sample = await prisma.video.findMany({
-      where,
-      orderBy: [{ publishedAt: "desc" }],
-      take: 3,
-      select: {
-        id: true,
-        title: true,
-        publishedAt: true,
-        durationSec: true,
-        url: true,
-        platformVideoId: true,
-        views: true,
-        likes: true,
-      },
+      where, orderBy: [{ publishedAt: "desc" }], take: 3,
+      select: { id: true, title: true, publishedAt: true, durationSec: true, url: true, platformVideoId: true, views: true, likes: true },
     });
 
     return NextResponse.json(
       {
         ok: true,
-        window: { range, since: since.toISOString() },
-        counts: {
-          baseAllPlatforms,
-          baseYouTubeInsensitive,
-          shortByDur,
-          shortByUrl,
-          durNull,
-          afterShorts,
+        window: { range, since: baseSince.toISOString() },
+        counts24h: {
+          ...counts24h,
+          shortByDur: shortByDur24h,
+          shortByUrl: shortByUrl24h,
+          durNull: durNull24h,
         },
+        effectiveWindow: {
+          since: effectiveSince.toISOString(),
+          hours: effectiveHours,
+          widened: effectiveHours !== baseHours,
+        },
+        afterShortsEffective,
         platforms,
         latest,
         sample,
@@ -192,7 +178,7 @@ export async function GET(req: Request) {
   }
 
   // =========================
-  // normal response (for page)
+  // 通常レスポンス（空を避けるフォールバック適用済み）
   // =========================
   const rows = await prisma.video.findMany({
     where,
@@ -224,10 +210,14 @@ export async function GET(req: Request) {
       page,
       take,
       total,
-      window: { range, since: since.toISOString() },
-      version: {
-        commit: process.env.VERCEL_GIT_COMMIT_SHA?.slice(0, 7) || "local",
+      window: { range, since: baseSince.toISOString() },
+      effectiveWindow: {
+        since: effectiveSince.toISOString(),
+        hours: effectiveHours,
+        widened: effectiveHours !== baseHours,
       },
+      params: { excludeShorts, noFallback },
+      version: { commit: process.env.VERCEL_GIT_COMMIT_SHA?.slice(0, 7) || "local" },
     },
     { headers: { "Cache-Control": "no-store, no-cache, max-age=0" } }
   );
