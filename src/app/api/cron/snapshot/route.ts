@@ -1,80 +1,73 @@
-// src/app/api/refresh/youtube/route.ts
+// src/app/api/cron/snapshot/route.ts
 export const dynamic = "force-dynamic";
 
-import { NextResponse } from "next/server";
 import { PrismaClient } from "@prisma/client";
-import { fetchDetails } from "@/lib/youtube";
+import { fetchRecentYouTubeSinceHours } from "@/lib/youtube";
 
 const prisma = new PrismaClient();
 
-/**
- * /api/refresh/youtube?ids=AaBb,BbCc
- * or POST { "ids": ["AaBb", "BbCc"] }
- */
+function authorized(req: Request) {
+  const u = new URL(req.url);
+  const s = process.env.CRON_SECRET ?? "";
+  const ua = req.headers.get("user-agent") || "";
+  return (
+    req.headers.get("x-vercel-cron") !== null ||
+    /vercel-cron/i.test(ua) ||
+    req.headers.get("authorization")?.replace(/^Bearer\s+/i, "") === s ||
+    u.searchParams.get("secret") === s
+  );
+}
+
 export async function GET(req: Request) {
-  try {
-    const url = new URL(req.url);
-    const idsParam = url.searchParams.get("ids") || "";
-    const ids = idsParam.split(",").map(s => s.trim()).filter(Boolean);
-    if (ids.length === 0) {
-      return NextResponse.json({ ok: false, error: "required: ids" }, { status: 400 });
-    }
-    return NextResponse.json(await refreshByIds(ids), { headers: { "Cache-Control": "no-store" } });
-  } catch (e: any) {
-    return NextResponse.json({ ok: false, error: String(e?.message || e) }, { status: 500 });
+  if (!authorized(req)) {
+    return new Response(JSON.stringify({ ok: false, route: "cron/snapshot", error: "unauthorized" }), {
+      status: 401,
+      headers: { "content-type": "application/json" },
+    });
   }
-}
 
-export async function POST(req: Request) {
-  try {
-    const body = (await req.json().catch(() => ({}))) as any;
-    const ids: string[] = Array.isArray(body?.ids) ? body.ids : [];
-    if (ids.length === 0) {
-      return NextResponse.json({ ok: false, error: "required: JSON body { ids: string[] }" }, { status: 400 });
-    }
-    return NextResponse.json(await refreshByIds(ids), { headers: { "Cache-Control": "no-store" } });
-  } catch (e: any) {
-    return NextResponse.json({ ok: false, error: String(e?.message || e) }, { status: 500 });
-  }
-}
-
-async function refreshByIds(ids: string[]) {
   const t0 = Date.now();
-  const details = await fetchDetails(ids);
-  const platform = "youtube";
+  const url = new URL(req.url);
+  const hours = Math.min(72, Math.max(6, Number(url.searchParams.get("sinceHours") || "48") || 48));
+  const limit = Math.min(500, Math.max(50, Number(url.searchParams.get("limit") || "300") || 300));
+  const query = url.searchParams.get("q") || undefined;
 
+  // 直近公開動画を取得
+  const { items } = await fetchRecentYouTubeSinceHours(hours, { limit, query });
+
+  let fetched = items.length;
   let upserts = 0;
   let skippedNoPublishedAt = 0;
-  const errors: string[] = [];
+  const errs: string[] = [];
 
-  for (const v of details) {
+  for (const r of items) {
     try {
-      const platformVideoId = v.id;
-
-      // publishedAt は必須想定：無ければスキップ
-      if (!v.publishedAt) {
+      if (!r.publishedAt) {
         skippedNoPublishedAt++;
-        continue;
+        continue; // publishedAt は必須
       }
-      const publishedAt = new Date(v.publishedAt);
+      const publishedAt = new Date(r.publishedAt);
 
-      // ここで "nullable を正規化"
-      const title: string | undefined = v.title ?? undefined;
-      const urlStr: string = `https://www.youtube.com/watch?v=${platformVideoId}`;
-      const thumbnailUrl: string | undefined = v.thumbnailUrl ?? undefined;
-      const channelTitle: string | undefined = v.channelTitle ?? undefined;
-      const durationSec: number | undefined = v.durationSec ?? undefined;
-      const views: number | undefined = v.views ?? undefined;
-      const likes: number | undefined = v.likes ?? undefined;
+      const platform = "youtube";
+      const platformVideoId = r.id;
+
+      const title = r.title ?? "(untitled)";
+      const urlStr = r.url ?? `https://www.youtube.com/watch?v=${platformVideoId}`;
+      const thumb = r.thumbnailUrl ?? "";
+      const channel = r.channelTitle ?? "";
+
+      const duration = r.durationSec ?? undefined;
+      const views = r.views ?? undefined;
+      const likes = r.likes ?? undefined;
 
       await prisma.video.upsert({
         where: { platform_platformVideoId: { platform, platformVideoId } },
         update: {
-          ...(title !== undefined ? { title } : {}),
-          url: urlStr, // 常に補正
-          ...(thumbnailUrl !== undefined ? { thumbnailUrl } : {}),
-          ...(channelTitle !== undefined ? { channelTitle } : {}),
-          ...(durationSec !== undefined ? { durationSec } : {}),
+          title,
+          url: urlStr,
+          thumbnailUrl: thumb,
+          channelTitle: channel,
+          ...(duration !== undefined ? { durationSec: duration } : {}),
           publishedAt,
           ...(views !== undefined ? { views } : {}),
           ...(likes !== undefined ? { likes } : {}),
@@ -82,11 +75,11 @@ async function refreshByIds(ids: string[]) {
         create: {
           platform,
           platformVideoId,
-          title: title ?? "(untitled)",
+          title,
           url: urlStr,
-          thumbnailUrl: thumbnailUrl ?? "",
-          channelTitle: channelTitle ?? "",
-          durationSec,
+          thumbnailUrl: thumb,
+          channelTitle: channel,
+          durationSec: duration,
           publishedAt,
           views,
           likes,
@@ -96,7 +89,7 @@ async function refreshByIds(ids: string[]) {
 
       upserts++;
     } catch (e: any) {
-      errors.push(String(e?.message || e));
+      errs.push(String(e?.message || e));
     }
   }
 
@@ -105,14 +98,18 @@ async function refreshByIds(ids: string[]) {
     select: { platform: true, publishedAt: true, createdAt: true },
   });
 
-  return {
-    ok: true,
-    requested: ids.length,
-    fetched: details.length,
-    upserts,
-    skippedNoPublishedAt,
-    latest,
-    tookMs: Date.now() - t0,
-    errors: errors.length ? errors.slice(0, 5) : undefined,
-  };
+  return new Response(
+    JSON.stringify({
+      ok: true,
+      route: "cron/snapshot",
+      params: { hours, limit, query },
+      fetched,
+      upserts,
+      skippedNoPublishedAt,
+      latest,
+      tookMs: Date.now() - t0,
+      errors: errs.length ? errs.slice(0, 5) : undefined,
+    }),
+    { headers: { "content-type": "application/json", "cache-control": "no-store" } }
+  );
 }
