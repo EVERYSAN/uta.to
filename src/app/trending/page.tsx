@@ -5,7 +5,7 @@ import Link from "next/link";
 import { Suspense, useEffect, useRef, useState } from "react";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 
-// SSRのプリレンダー絡みを避ける
+// SSRのプリレンダー絡みを避ける（任意）
 export const dynamic = "force-dynamic";
 
 /* ========= utils ========= */
@@ -65,7 +65,7 @@ function TrendingBadge({ rank, range }: { rank?: number | null; range: "1d" | "7
 function VideoCard({ v, range }: { v: Video; range: "1d" | "7d" | "30d" }) {
   return (
     <Link
-      href={`/${v.id}`}
+      href={`/v/${v.id}`} // ★ ここを修正
       prefetch={false}
       className="group block rounded-2xl overflow-hidden bg-zinc-900 hover:bg-zinc-800 transition-colors"
     >
@@ -192,7 +192,7 @@ function TrendingPageInner() {
     router.replace(`${pathname}?${qs.toString()}`, { scroll: false });
   };
 
-  // 条件が変わったら完全リセットして 1 ページ目から
+  // 条件が変わったら 1 ページ目から
   useEffect(() => {
     setItems([]);
     setPage(1);
@@ -254,13 +254,11 @@ function TrendingPageInner() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []); // 初回のみ
 
-  // 条件が変わった時にセクションごと再マウント→表示ブレ抑制
   const listKey = `${range}-${shorts}`;
 
   return (
     <main className="mx-auto max-w-7xl px-4 py-6 space-y-4">
       <div className="flex items-center justify-between">
-        {/* 黒文字でコントラスト確保 */}
         <h1 className="text-2xl md:text-3xl font-bold text-black">急上昇</h1>
       </div>
 
