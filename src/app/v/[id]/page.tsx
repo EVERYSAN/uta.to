@@ -1,8 +1,9 @@
+// src/app/v/[id]/page.tsx
 import { PrismaClient } from '@prisma/client';
 import { notFound } from 'next/navigation';
 import Link from 'next/link';
 import ClientBits from './ClientBits';
-import YouTubeLite from '@/components/YouTubeLite';
+import YouTubeShortPlayer from '@/components/YouTubeShortPlayer';
 
 export const dynamic = 'force-dynamic'; // 常に最新を取得
 
@@ -32,10 +33,10 @@ const secsToLabel = (s?: number | null) => {
     : `${m}:${String(sec).padStart(2, '0')}`;
 };
 
-/** URL/ID/shorts から 11桁のYouTube IDを抽出（既存のあなたの実装を流用） */
+/** URL/ID/shorts から 11桁のYouTube IDを抽出 */
 function toYouTubeId(input?: string | null): string | null {
   if (!input) return null;
-  if (/^[a-zA-Z0-9_-]{11}$/.test(input)) return input; // 既にID
+  if (/^[a-zA-Z0-9_-]{11}$/.test(input)) return input; // 既にIDならそのまま
 
   try {
     const u = new URL(input);
@@ -59,7 +60,7 @@ function toYouTubeId(input?: string | null): string | null {
       return parts[1].substring(0, 11);
     }
   } catch {
-    // 生文字列から拾う
+    /* noop: 生文字列から拾う */
   }
   const m = input.match(/([a-zA-Z0-9_-]{11})/);
   return m ? m[1] : null;
@@ -104,12 +105,21 @@ export default async function VideoDetailPage({ params }: Params) {
 
   if (!v) notFound();
 
+  // 正規化（platformVideoId が URL でもOK）
+  const idOrUrl = v.platformVideoId || v.url || '';
+  const ytId = toYouTubeId(idOrUrl);
+
+  // 縦型判定：duration<=60 または shorts URL
+  const isShort =
+    (typeof v.durationSec === 'number' ? v.durationSec <= 60 : false) ||
+    /(^|\/)shorts(\/|$)/.test(idOrUrl);
+
   // 関連（同チャンネル優先→足りなければ直近公開で補完）
   let related = await prisma.video.findMany({
     where: {
       id: { not: v.id },
-      platform: 'youtube',
-      channelTitle: v.channelTitle ?? undefined,
+      platform: { equals: 'youtube', mode: 'insensitive' },
+      ...(v.channelTitle ? { channelTitle: v.channelTitle } : {}),
     },
     orderBy: [{ publishedAt: 'desc' as const }],
     take: 12,
@@ -125,7 +135,10 @@ export default async function VideoDetailPage({ params }: Params) {
 
   if (related.length < 8) {
     const more = await prisma.video.findMany({
-      where: { id: { not: v.id }, platform: 'youtube' },
+      where: {
+        id: { not: v.id },
+        platform: { equals: 'youtube', mode: 'insensitive' },
+      },
       orderBy: [{ publishedAt: 'desc' as const }],
       take: 12 - related.length,
       select: {
@@ -140,26 +153,22 @@ export default async function VideoDetailPage({ params }: Params) {
     related = [...related, ...more];
   }
 
-  // 正規化（platformVideoId が URL でもOK）
-  const idOrUrl = v.platformVideoId || v.url || '';
-  const ytId = toYouTubeId(idOrUrl);
-  const isVertical = /(^|\/)shorts(\/|$)/.test(idOrUrl);
-
   return (
     <main className="mx-auto max-w-7xl px-4 py-6 grid grid-cols-1 lg:grid-cols-12 gap-6">
       {/* 左：プレイヤー＆メタ */}
       <article className="lg:col-span-8 space-y-4">
-        {/* 外側の aspect-video を外し、比率は YouTubeLite 側で制御 */}
-        <div className="rounded-2xl overflow-hidden">
-          {v.platform === 'youtube' ? (
+        {/* 外側の aspect は付けず、比率はプレイヤー側で制御 */}
+        <div className="rounded-2xl overflow-hidden bg-black">
+          {v.platform?.toLowerCase() === 'youtube' ? (
             ytId ? (
-              <YouTubeLite
-                idOrUrl={ytId}           // IDでもURLでもOK（ここはIDを渡してOK）
-                isVertical={isVertical}  // 縦動画ならモバイルで 9:16 表示
+              <YouTubeShortPlayer
+                videoId={ytId}
                 title={v.title ?? 'video'}
+                isShort={isShort}
+                autoPlay={false}
               />
             ) : (
-              // IDが取れない場合のフォールバック（小さくボタン表示）
+              // IDが取れない場合のフォールバック
               <div className="w-full aspect-video grid place-items-center bg-zinc-900 text-zinc-200">
                 <a
                   href={v.url ?? '#'}
@@ -172,7 +181,7 @@ export default async function VideoDetailPage({ params }: Params) {
               </div>
             )
           ) : (
-            // YouTube以外のフォールバック（必要ならHLS/MP4）
+            // YouTube以外のフォールバック
             <iframe
               src={v.url ?? ''}
               title={v.title ?? 'video'}
