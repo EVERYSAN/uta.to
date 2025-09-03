@@ -8,14 +8,14 @@ export async function GET() {
   try {
     const [total, withViews, top] = await Promise.all([
       prisma.video.count(),
-      prisma.video.count({ where: { view: { gt: 0 } } }),
+      prisma.video.count({ where: { views: { gt: 0 } } }),
       prisma.video.findFirst({
-        where: { view: { gt: 0 } },
-        orderBy: { view: "desc" },
+        where: { views: { gt: 0 } },
+        orderBy: { views: "desc" },
         select: {
           id: true,
           title: true,
-          view: true,
+          views: true,
           url: true,
           platform: true,
           platformVideoId: true,
