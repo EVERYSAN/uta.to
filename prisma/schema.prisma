@@ -23,8 +23,9 @@ model Video {
   thumbnailUrl     String?
   publishedAt      DateTime?
   durationSec      Int?
-  views             Int?
-  likes             Int       @default(0)
+  views            Int?
+  likes            Int       @default(0)
+  description      String?
   supportPoints    Int       @default(0)
   createdAt        DateTime  @default(now())
   updatedAt        DateTime  @updatedAt
@@ -62,6 +63,7 @@ model SupportSnapshot {
   @@id([videoId, hourStart])
   @@index([hourStart])
 }
+
 
 
 
