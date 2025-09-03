@@ -3,22 +3,6 @@ import "./globals.css";
 import type { Metadata } from "next";
 import Link from "next/link";
 
-// 例）ヘッダー右側に
-<header className="sticky top-0 z-40 bg-zinc-950/80 backdrop-blur border-b border-zinc-900">
-  <div className="mx-auto max-w-7xl px-4 h-12 flex items-center justify-between gap-3">
-    {/* 左側は既存のロゴやナビ */}
-    <div className="flex items-center gap-3">
-      {/* ...既存... */}
-    </div>
-    {/* ★ここに追加 */}
-    <HeaderActions />
-  </div>
-</header>
-
-// body の一番最後（children の直後あたり）に
-<ActionDock />
-
-
 export const metadata: Metadata = {
   metadataBase: new URL("https://uta-to.vercel.app"),
   title: { default: "uta.to", template: "%s | uta.to" },
@@ -47,7 +31,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
         <link rel="preconnect" href="https://s.ytimg.com" />
       </head>
       <body className="min-h-screen bg-white text-gray-900">
-        {/* PC: ヘッダー（ホーム / 保存 のみ） */}
+        {/* PC: ヘッダー（ホーム / 保存） */}
         <header className="hidden md:block sticky top-0 z-40 border-b bg-white/80 backdrop-blur supports-[backdrop-filter]:bg-white/60">
           <nav className="mx-auto max-w-screen-xl px-4 py-3 flex items-center justify-between text-sm">
             <div className="flex items-center gap-5">
@@ -57,12 +41,12 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
           </nav>
         </header>
 
-        {/* 本文。SPのフッターが被らないように下余白を確保 */}
+        {/* 本文（SPのフッターと重ならないよう下パディングを大きめに） */}
         <main className="mx-auto max-w-screen-xl px-4 py-6 pb-24 md:pb-8">
           {children}
         </main>
 
-        {/* SP: 下部固定フッター（ホーム / 保存 のみ） */}
+        {/* SP: 下部固定フッター（ホーム / 保存） */}
         <nav
           className="md:hidden fixed inset-x-0 bottom-0 z-40 border-t bg-white/90 backdrop-blur supports-[backdrop-filter]:bg-white/70"
           style={{ paddingBottom: "env(safe-area-inset-bottom)" }}
@@ -94,5 +78,3 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
     </html>
   );
 }
-
-
