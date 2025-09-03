@@ -251,19 +251,7 @@ export default function TrendingPage() {
   return (
     <main className="mx-auto max-w-7xl px-0 md:px-4 py-4 md:py-6 space-y-4">
       {/* ▼ 見出しをロゴに置換 */}
-      <div className="mx-auto max-w-screen-xl px-4 md:px-6 pt-4">
-        <div className="flex items-end gap-6">
-          <Image
-            src="/buzz-uta.png"
-            alt="BUZZ UTA"
-            width={512}
-            height={512}
-            priority
-            // スマホ: 44 → タブレット: 72 → デスクトップ: 96
-            className="w-44 md:w-72 lg:w-96 h-auto"
-            sizes="(min-width: 1024px) 384px, (min-width: 768px) 288px, 176px"
-          />
-        </div>
+      <div className="h-10 md:h-12" />
       </div>
 
       <div className="px-4">
