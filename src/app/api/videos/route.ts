@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-explicit-any */
 import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 
@@ -6,10 +7,9 @@ import { prisma } from "@/lib/prisma";
  * - range   : 集計窓（既定 24h）
  * - sort    : "trend"=急上昇(ロング優先) / "support"=応援順（既定 trend）
  * - long    : 1 ならロング動画のみ表示（既定 0）
- * - limit   : 件数（既定 36）
+ * - limit   : 件数（既定 36、最大 100）
  *
  * ※ SupportSnapshot が無い動画も必ず返す（0 として扱う）
- * ※ スキーマの差異に強いように snapshot のフィールド名は安全に読み取る
  */
 export async function GET(req: Request) {
   const { searchParams } = new URL(req.url);
@@ -25,61 +25,53 @@ export async function GET(req: Request) {
   if (range === "7d") from.setDate(from.getDate() - 7);
   if (range === "30d") from.setDate(from.getDate() - 30);
 
-  // --- Video 単体条件だけで絞る（←重要：子テーブルでは絞らない）
-  const videoWhere: any = {
-    publishedAt: { gte: from, lte: now },
-  };
-
-  if (longOnly) {
-    // ロング動画の判定：60秒以上 or shorts URL ではない
-    videoWhere.AND = [
-      { OR: [{ durationSec: { gte: 60 } }, { durationSec: null }] },
-      { url: { not: { contains: "/shorts/" } } },
-    ];
-  }
-
-  // --- LEFT JOIN 的に snapshot を付与（where ではなく include で時間窓を絞る）
+  // 子テーブルで絞ると“応援が無い動画”が落ちるため、Video だけを条件にする
+  const take = limit * (longOnly ? 5 : 3); // 後段フィルタ・並び替え用に少し多め
   const videos = await prisma.video.findMany({
-    where: videoWhere,
-    orderBy: { publishedAt: "desc" }, // 基本は新しい順、あとでJS側で並び替え
-    take: limit * 3, // 後段ソートするので少し多めに取っておく
+    where: {
+      publishedAt: { gte: from, lte: now },
+    },
+    orderBy: { publishedAt: "desc" },
+    take,
     include: {
-      // モデル名は schema に合わせて OK。relation を作っていない場合はこの include を消しても動きます。
+      // LEFT JOIN 的にスナップショットを付ける。型の揺れに耐えるため any で緩める
       supportSnapshots: {
         where: { windowStart: { gte: from } },
-        select: {
-          // フィールド名の差異を吸収するため両方試す（Prisma 型エラー回避で any キャスト併用）
-          // score or value のどちらかが入っていれば良い
-          // @ts-ignore
-          score: true,
-          // @ts-ignore
-          value: true,
-        },
-      } as any,
+        select: { score: true, value: true } as any,
+      },
     } as any,
   });
 
-  // 安全な集計ヘルパ
+  // 集計ヘルパ：score/value のどちらでも合算
   const sumSupport = (v: any) => {
-    const snaps: Array<{ score?: number; value?: number }> =
+    const snaps: Array<{ score?: number | null; value?: number | null }> =
       (v as any)?.supportSnapshots ?? [];
     if (!Array.isArray(snaps) || snaps.length === 0) return 0;
-    return snaps.reduce((acc, s) => acc + (s.score ?? s.value ?? 0), 0);
+    return snaps.reduce((acc, s) => acc + (Number(s.score ?? s.value ?? 0) || 0), 0);
   };
 
+  // ロング判定：URLに /shorts/ が入っていればショート。durationSec>=60 をロング。
   const isLong = (v: any) => {
-    if (typeof v?.url === "string" && v.url.includes("/shorts/")) return false;
-    if (typeof v?.durationSec === "number") return v.durationSec >= 60;
+    const url = typeof v?.url === "string" ? v.url : "";
+    if (url.includes("/shorts/")) return false;
+    const dur = (v as any)?.durationSec;
+    if (typeof dur === "number") return dur >= 60;
     return true; // 不明ならロング扱い
   };
 
-  // 返却配列の整形 + スコア計算
-  const list = videos.map((v) => {
+  const windowHours = range === "24h" ? 24 : range === "7d" ? 24 * 7 : 24 * 30;
+
+  let list = videos.map((v: any) => {
     const support = sumSupport(v);
-    const hours = Math.max(1, (now.getTime() - new Date(v.publishedAt).getTime()) / 3600000);
+
+    // publishedAt は null の可能性に備えて安全に扱う
+    const publishedMs = v?.publishedAt
+      ? new Date(v.publishedAt as any).getTime()
+      : now.getTime();
+    const hours = Math.max(1, (now.getTime() - publishedMs) / 3_600_000);
 
     // 急上昇スコア：応援合計に時間減衰（新しいほど強い）をかけ、ロングは微ブースト
-    let trendScore = support / Math.pow(hours / 24, 0.35); // 窓に対して緩やかに減衰
+    let trendScore = support / Math.pow(hours / (windowHours || 24), 0.35);
     if (isLong(v)) trendScore *= 1.1; // 「ロング優先」の味付け（従来挙動の維持）
 
     return {
@@ -88,7 +80,7 @@ export async function GET(req: Request) {
       url: v.url,
       channelTitle: v.channelTitle,
       thumbnailUrl: v.thumbnailUrl,
-      durationSec: v.durationSec,
+      durationSec: v.durationSec ?? null,
       publishedAt: v.publishedAt,
       supportCount: support,
       trendScore,
@@ -96,30 +88,28 @@ export async function GET(req: Request) {
     };
   });
 
+  // ロング動画だけにする場合は後段でフィルタ
+  if (longOnly) {
+    list = list.filter((x) => x.isLong);
+  }
+
   // 並び替え
   if (sort === "support") {
     list.sort(
       (a, b) =>
         b.supportCount - a.supportCount ||
-        new Date(b.publishedAt).getTime() - new Date(a.publishedAt).getTime()
+        new Date(b.publishedAt ?? now).getTime() - new Date(a.publishedAt ?? now).getTime()
     );
   } else {
-    // trend: 急上昇（ロング優先）
     list.sort(
       (a, b) =>
         b.trendScore - a.trendScore ||
-        new Date(b.publishedAt).getTime() - new Date(a.publishedAt).getTime()
+        new Date(b.publishedAt ?? now).getTime() - new Date(a.publishedAt ?? now).getTime()
     );
   }
 
   // 最終件数を制限
-  const sliced = list.slice(0, limit);
+  const items = list.slice(0, limit);
 
-  return NextResponse.json({
-    range,
-    sort,
-    longOnly,
-    count: sliced.length,
-    items: sliced,
-  });
+  return NextResponse.json({ range, sort, longOnly, count: items.length, items });
 }
