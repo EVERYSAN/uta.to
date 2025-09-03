@@ -248,12 +248,14 @@ export default function TrendingPage() {
   }, [page, loading, hasMore]);
 
   return (
-    <main className="mx-auto max-w-7xl px-4 py-6 space-y-4">
-      <h1 className="text-2xl md:text-3xl font-bold">急上昇（ロング優先）</h1>
+    <main className="mx-auto max-w-7xl px-0 md:px-4 py-4 md:py-6 space-y-4">
+      <h1 className="px-4 text-2xl md:text-3xl font-bold">急上昇（ロング優先）</h1>
 
-      <FilterBar prefs={prefs} onChange={sync} />
+      <div className="px-4">
+        <FilterBar prefs={prefs} onChange={sync} />
+      </div>
 
-      <section className="grid gap-4 grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4">
+      <section className="px-4 grid gap-4 grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4">
         {items.map((v) => (
           <VideoCard key={v.id} v={v} rangeLabel={rangeLabel} />
         ))}
