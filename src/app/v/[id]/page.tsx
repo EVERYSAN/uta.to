@@ -5,6 +5,8 @@ import Link from 'next/link';
 import ClientBits from './ClientBits';
 import YouTubeShortPlayer from '@/components/YouTubeShortPlayer';
 import HistoryMarker from '@/components/HistoryMarker';
+import SupportButton from "@/components/SupportButton";
+
 
 export const dynamic = 'force-dynamic'; // 常に最新を取得
 
@@ -76,6 +78,9 @@ function TrendingBadge() {
     </div>
   );
 }
+
+<ClientBits videoId={v.id} />
+<SupportButton videoId={v.id} initialPoints={(v as any).supportPoints ?? 0} />
 
 type Params = { params: { id: string } };
 
