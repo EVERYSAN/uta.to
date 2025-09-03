@@ -1,14 +1,15 @@
-// src/lib/prisma.ts
 import { PrismaClient } from "@prisma/client";
 
-// Next.js の HMR 環境でインスタンスを使い回す
+/**
+ * Next.js (dev) の HMRでインスタンスが増殖しないようにグローバルに保持
+ */
 const globalForPrisma = globalThis as unknown as { prisma?: PrismaClient };
 
-export const prisma =
+const prisma =
   globalForPrisma.prisma ??
   new PrismaClient({
-    // ← stdout に出す（Vercel のログで見える）
-    log: ["warn", "error"],
+    // ログは必要なら "query" などを足す
+    log: [],
   });
 
 if (process.env.NODE_ENV !== "production") {
