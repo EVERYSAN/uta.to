@@ -1,80 +1,57 @@
 // src/app/api/cron/snapshot/route.ts
 import { NextResponse } from "next/server";
+import prisma from "@/lib/prisma";
+import { floorToHourUtc, subHours } from "@/lib/support";
 
-export const runtime = "nodejs";
+export const dynamic = "force-dynamic";      // Cron実行時の安定化
+export const runtime = "nodejs";             // PrismaのためEdgeではなくNode
 
-// 自身のデプロイを叩くためのヘルパ
-function selfUrl(path: string, search?: Record<string, string | number | boolean | null | undefined>) {
-  // Vercel のランタイムで有効
-  const base =
-    process.env.VERCEL_URL?.startsWith("http")
-      ? process.env.VERCEL_URL
-      : process.env.VERCEL_URL
-      ? `https://${process.env.VERCEL_URL}`
-      : ""; // ローカル fallback は相対で
-
-  const u = new URL(path, base || "http://localhost:3000");
-  if (search) {
-    for (const [k, v] of Object.entries(search)) {
-      if (v === undefined || v === null) continue;
-      u.searchParams.set(k, String(v));
-    }
-  }
-  return u.toString();
+function authOk(req: Request) {
+  const token = process.env.CRON_SECRET;
+  if (!token) return true; // 未設定なら無認証で許可
+  const url = new URL(req.url);
+  const q = url.searchParams.get("token");
+  const h = req.headers.get("authorization");
+  return q === token || h === `Bearer ${token}`;
 }
 
-export async function GET() {
-  const results: any[] = [];
-  const warnings: string[] = [];
-
-  // Deployment Protection を回避（ある場合）
-  const bypass = process.env.VERCEL_AUTOMATION_BYPASS_TOKEN || process.env.PROTECTION_BYPASS_TOKEN || "";
-
-  // refresh/youtube を毎回 no-store で叩く
-  try {
-    const url = selfUrl("/api/refresh/youtube", bypass
-      ? {
-          "x-vercel-protection-bypass": bypass,
-          "x-vercel-set-bypass-cookie": true,
-          limit: 32,
-          hours: 6,
-        }
-      : {
-          limit: 32,
-          hours: 6,
-        });
-
-    const res = await fetch(url, {
-      // ⚠ 警告回避のため、`cache: 'no-store'` のみに統一
-      cache: "no-store",
-    });
-
-    // ここで res.ok が false でも throw しない
-    const text = await res.text();
-    let data: any = {};
-    try {
-      data = JSON.parse(text);
-    } catch {
-      data = { raw: text.slice(0, 500) };
-    }
-    results.push({ route: "refresh/youtube", status: res.status, ...data });
-    if (!res.ok || data?.ok === false) {
-      warnings.push(`refresh/youtube returned status=${res.status}, ok=${data?.ok}`);
-    }
-  } catch (e: any) {
-    results.push({ route: "refresh/youtube", ok: false, error: e?.message || String(e) });
-    warnings.push(`refresh/youtube error: ${e?.message || e}`);
+export async function GET(req: Request) {
+  if (!authOk(req)) {
+    return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
   }
 
-  // 必要なら他の更新処理もここに追加
+  // [prevHour, currentHour)
+  const currentHour = floorToHourUtc(new Date());
+  const prevHour = subHours(currentHour, 1);
 
-  return NextResponse.json(
-    {
-      ok: warnings.length === 0,
-      results,
-      warnings,
-      ts: new Date().toISOString(),
-    },
-    { status: 200 }
-  );
+  // この1時間での応援を動画ごとに集計
+  const groups = await prisma.supportEvent.groupBy({
+    by: ["videoId"],
+    where: { createdAt: { gte: prevHour, lt: currentHour } },
+    _sum: { amount: true },
+  });
+
+  let upserts = 0;
+  for (const g of groups) {
+    const amount = g._sum.amount ?? 0;
+    if (amount <= 0) continue;
+    await prisma.supportSnapshot.upsert({
+      where: { videoId_hourStart: { videoId: g.videoId, hourStart: prevHour } },
+      create: { videoId: g.videoId, hourStart: prevHour, amount },
+      update: { amount },
+    });
+    upserts++;
+  }
+
+  // 古いスナップショットを整理（40日より前を削除）
+  const cut = subHours(currentHour, 40 * 24);
+  await prisma.supportSnapshot.deleteMany({ where: { hourStart: { lt: cut } } });
+
+  return NextResponse.json({
+    ok: true,
+    from: prevHour.toISOString(),
+    to: currentHour.toISOString(),
+    groups: groups.length,
+    upserts,
+  });
 }
