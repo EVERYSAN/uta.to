@@ -7,8 +7,10 @@ const prisma = new PrismaClient();
 // shorts=exclude のときのロング判定（60秒以上 or /shorts/ を含まない）
 const longOnlyWhere: Prisma.VideoWhereInput = {
   AND: [
-    { OR: [{ durationSec: { gte: 60 } }, { durationSec: null }] },
-    { OR: [{ url: { not: { contains: "/shorts/" } } }, { url: null }] },
+    // 60秒以上（or durationSec が nullable なら null を許容したい場合は schema に合わせて下行を残す）
+    { OR: [{ durationSec: { gte: 60 } }, { durationSec: null as any }] },
+    // url は非nullフィールドなので null 比較は不可。/shorts/ を含まない条件だけにする
+    { url: { not: { contains: "/shorts/" } } },
   ],
 };
 
