@@ -2,7 +2,6 @@
 "use client";
 
 import Link from "next/link";
-import Image from "next/image";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 
@@ -94,7 +93,9 @@ function VideoCard({ v, rangeLabel }: { v: Video; rangeLabel: string }) {
         <div className="flex items-center gap-3 text-[12px] text-zinc-400">
           <span>👁 {fmtCount(v.views)}</span>
           <span>❤️ {fmtCount(v.likes)}</span>
-          <span>🔥 {rangeLabel === "24時間" ? "今日の応援" : `${rangeLabel}の応援`} {fmtCount(v.supportInRange ?? 0)}</span>
+          <span>
+            🔥 {rangeLabel === "24時間" ? "今日の応援" : `${rangeLabel}の応援`} {fmtCount(v.supportInRange ?? 0)}
+          </span>
           {v.channelTitle && (
             <span className="ml-auto truncate max-w-[50%] text-zinc-300">🎤 {v.channelTitle}</span>
           )}
@@ -250,9 +251,8 @@ export default function TrendingPage() {
 
   return (
     <main className="mx-auto max-w-7xl px-0 md:px-4 py-4 md:py-6 space-y-4">
-      {/* ▼ 見出しをロゴに置換 */}
+      {/* ▼ 見出しはヘッダーのロゴに任せるのでスペーサだけ */}
       <div className="h-10 md:h-12" />
-      </div>
 
       <div className="px-4">
         <FilterBar prefs={prefs} onChange={sync} />
