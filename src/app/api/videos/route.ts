@@ -30,60 +30,63 @@ export async function GET(req: Request) {
     const url = new URL(req.url);
     const { shorts, sort, page, take, from } = parseParams(url);
 
-    // where 句（スキーマ互換のみ使用）
     const where: any = {
       publishedAt: { gte: from },
     };
 
-    // shorts フィルタ（url の null 判定などは使わない）
+    // 60秒以下=ショート、61秒以上=ロング
     if (shorts === "only") {
       where.durationSec = { lte: 60 };
     } else if (shorts === "exclude" || shorts === "long") {
-      // 仕様: 61秒以上をロング
       where.durationSec = { gte: 61 };
     }
+
     const skip = (page - 1) * take;
 
-    // 並び替えの既定（急上昇以外は DB 並び替え）
     let orderBy: any = undefined;
     if (sort === "latest") orderBy = { publishedAt: "desc" };
     else if (sort === "popular") orderBy = { views: "desc" };
     else if (sort === "support") orderBy = { likes: "desc" };
 
-    // 返すフィールド
     const select = {
       id: true,
       title: true,
       thumbnailUrl: true,
       channelTitle: true,
-      publishedAt: true,
+      publishedAt: true, // Date | null
       durationSec: true,
       views: true,
       likes: true,
       url: true,
     };
 
-    // 急上昇のみアプリ側でスコア計算
+    // 急上昇はアプリ側スコア
     if (sort === "trending") {
-      const poolSize = Math.max(take * 6, 120); // 少し多めに候補を取る
+      const poolSize = Math.max(take * 6, 120);
       const pool = await prisma.video.findMany({
         where,
-        orderBy: { publishedAt: "desc" }, // 新しい順に候補
+        orderBy: { publishedAt: "desc" },
         take: poolSize,
         select,
       });
 
-      const now = Date.now();
+      const nowMs = Date.now();
+
       const scored = pool.map((v) => {
-        const ageHours = Math.max(1, (now - new Date(v.publishedAt).getTime()) / 3600000);
-        // 応援データが無くても動く簡易スコア
+        // ▼ 修正ポイント: null セーフに変換
+        const publishedMs = v.publishedAt
+          ? new Date(v.publishedAt).getTime()
+          : 0; // null のときは「とても古い」扱い
+        const ageHours = Math.max(1, (nowMs - publishedMs) / 3_600_000);
+
         const base = (v.likes ?? 0) + (v.views ?? 0) / 50;
-        const trendScore = base / Math.pow(ageHours / 24, 0.35); // ゆるやか減衰
+        const trendScore = base / Math.pow(ageHours / 24, 0.35); // 緩やか減衰
         return { ...v, trendScore };
       });
 
       scored.sort((a, b) => b.trendScore - a.trendScore);
       const items = scored.slice(skip, skip + take);
+
       return NextResponse.json({
         ok: true,
         meta: { page, take, total: scored.length, sort: "trending" },
@@ -91,7 +94,7 @@ export async function GET(req: Request) {
       });
     }
 
-    // それ以外は DB 側で並び替え
+    // それ以外は DB 並び替え
     const [total, items] = await Promise.all([
       prisma.video.count({ where }),
       prisma.video.findMany({ where, orderBy, skip, take, select }),
