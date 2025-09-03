@@ -1,11 +1,25 @@
-import { prisma } from "@/lib/prisma";
+// src/app/api/videos/[id]/page.tsx
+import prisma from "@/lib/prisma";
 
 export const dynamic = "force-dynamic";
 
-export default async function VideoPage({ params }: { params: { id: string } }) {
+type Props = { params: { id: string } };
+
+export default async function VideoPage({ params }: Props) {
   const video = await prisma.video.findUnique({
     where: { id: params.id },
-    include: { creator: true },
+    // スカラだけ取り出す（creator は不要）
+    select: {
+      id: true,
+      title: true,
+      url: true,
+      platform: true,
+      platformVideoId: true,
+      thumbnailUrl: true,
+      channelTitle: true,
+      publishedAt: true,
+      description: true,
+    },
   });
 
   if (!video) {
@@ -13,13 +27,17 @@ export default async function VideoPage({ params }: { params: { id: string } }) 
   }
 
   const isYouTube = video.platform === "youtube";
-  const ytId = isYouTube ? (video.platformVideoId as string) : null;
+  const ytId = isYouTube ? (video.platformVideoId ?? "") : "";
+
+  const publishedLabel = video.publishedAt
+    ? new Date(video.publishedAt as unknown as string).toLocaleString("ja-JP", { timeZone: "Asia/Tokyo" })
+    : "日時不明";
 
   return (
     <main style={{ maxWidth: 1100, margin: "20px auto", padding: 16 }}>
       <h1 style={{ fontSize: 22, fontWeight: 700, marginBottom: 12 }}>{video.title}</h1>
       <div style={{ color: "#666", marginBottom: 12 }}>
-        {video.creator?.name ?? "Unknown"} / {new Date(video.publishedAt).toLocaleString("ja-JP", { timeZone: "Asia/Tokyo" })}
+        {video.channelTitle ?? "Unknown"} / {publishedLabel}
       </div>
 
       {isYouTube && ytId ? (
@@ -36,7 +54,9 @@ export default async function VideoPage({ params }: { params: { id: string } }) 
         <a href={video.url} target="_blank" rel="noreferrer">動画を開く</a>
       )}
 
-      <p style={{ whiteSpace: "pre-wrap", lineHeight: 1.6 }}>{video.description ?? ""}</p>
+      {video.description ? (
+        <p style={{ whiteSpace: "pre-wrap", lineHeight: 1.6 }}>{video.description}</p>
+      ) : null}
     </main>
   );
 }
