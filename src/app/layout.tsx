@@ -2,9 +2,6 @@
 import "./globals.css";
 import type { Metadata } from "next";
 import Link from "next/link";
-// 追加の import
-import HeaderActions from "@/components/HeaderActions";
-import ActionDock from "@/components/ActionDock";
 
 // 例）ヘッダー右側に
 <header className="sticky top-0 z-40 bg-zinc-950/80 backdrop-blur border-b border-zinc-900">
@@ -97,4 +94,5 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
     </html>
   );
 }
+
 
