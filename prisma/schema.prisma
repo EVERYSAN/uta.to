@@ -1,104 +1,48 @@
-generator client {
-  provider = "prisma-client-js"
-}
-
-datasource db {
-  provider = "postgresql"
-  url      = env("DATABASE_URL")
-}
-
-model Creator {
-  id               String   @id @default(cuid())
-  platform         String
-  platformUserId   String
-  name             String
-  thumbnailUrl     String?
-  createdAt        DateTime @default(now())
-  updatedAt        DateTime @updatedAt
-
-  videos           Video[]
-  @@unique([platform, platformUserId])
-}
-
 model Video {
   id               String   @id @default(cuid())
   platform         String
   platformVideoId  String
   title            String
-  description      String?
   url              String
+  channelTitle     String?
   thumbnailUrl     String?
+  publishedAt      DateTime?
   durationSec      Int?
-  channelTitle     String   @default("")
-  views            Int      @default(0)   
-  likes            Int      @default(0)   
-  publishedAt      DateTime
-  creator          Creator? @relation(fields: [creatorId], references: [id])
-  creatorId        String?
-  rawJson          Json?
-  createdAt        DateTime @default(now())
-  updatedAt        DateTime @updatedAt
-  metrics          VideoMetric[]
-  supportPoints    Int      @default(0)
-  supports         SupportEvent[]
+  viewCount        Int?
+  supportPoints    Int       @default(0)
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
 
-  // 逆方向 relation
-  statsSnapshots   StatsSnapshot[]
+  // 逆リレーション（これが無くて怒られていました）
+  supportEvents     SupportEvent[]
+  supportSnapshots  SupportSnapshot[]
 
-  @@unique([platform, platformVideoId])
-  @@index([publishedAt])
-  @@index([views])
-  @@index([likes])
+  @@unique([platform, platformVideoId], name: "platform_platformVideoId")
 }
-
-model StatsSnapshot {
-  id         String   @id @default(cuid())
-  video      Video    @relation(fields: [videoId], references: [id])
-  videoId    String
-  capturedAt DateTime @default(now())
-  views      Int?
-  likes      Int?
-  comments   Int?
-  bookmarks  Int?
-}
-
-model VideoMetric {
-  id       String   @id @default(cuid())
-  videoId  String
-  date     DateTime      // UTCの00:00（1日単位のスナップショット）
-  views    Int       @default(0)
-  likes    Int       @default(0)
-
-  video    Video     @relation(fields: [videoId], references: [id], onDelete: Cascade)
-
-  @@unique([videoId, date], name: "videoId_date")
-  @@index([date])
-}
-
 
 model SupportEvent {
-  id        String   @id @default(cuid())
-  videoId   String
-  video     Video    @relation(fields: [videoId], references: [id], onDelete: Cascade)
-  amount    Int      @default(1)
-  ua        String?
-  ipHash    String?
-  createdAt DateTime @default(now())
+  id         String    @id @default(cuid())
+  videoId    String
+  amount     Int       @default(1)
+  ipHash     String
+  createdAt  DateTime  @default(now())
+
+  // 親への関連
+  video  Video @relation(fields: [videoId], references: [id], onDelete: Cascade)
 
   @@index([videoId, createdAt])
 }
 
 model SupportSnapshot {
-  id         String   @id @default(cuid())
+  // 1時間ごとの集計。videoId + hourStart を複合主キーにして重複を防ぐ
   videoId    String
-  hourStart  DateTime               // UTCの時間粒度（分秒ミリ秒=0）
-  amount     Int
-  createdAt  DateTime @default(now())
+  hourStart  DateTime
+  amount     Int       @default(0)
+  createdAt  DateTime  @default(now())
 
-  video      Video    @relation(fields: [videoId], references: [id], onDelete: Cascade)
+  // 親への関連
+  video  Video @relation(fields: [videoId], references: [id], onDelete: Cascade)
 
-  @@unique([videoId, hourStart], name: "videoId_hourStart")
+  @@id([videoId, hourStart])
   @@index([hourStart])
 }
-
-
