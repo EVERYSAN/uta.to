@@ -1,7 +1,8 @@
-// FILE: src/app/trending/page.tsx
+// src/app/trending/page.tsx
 "use client";
 
 import Link from "next/link";
+import Image from "next/image";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 
@@ -249,7 +250,21 @@ export default function TrendingPage() {
 
   return (
     <main className="mx-auto max-w-7xl px-0 md:px-4 py-4 md:py-6 space-y-4">
-      <h1 className="px-4 text-2xl md:text-3xl font-bold">急上昇（ロング優先）</h1>
+      {/* ▼ 見出しをロゴに置換 */}
+      <div className="px-4">
+        <div className="flex items-center">
+          <Image
+            src="/buzz-uta.png"
+            alt="BUZZ UTA"
+            width={192}
+            height={192}
+            priority
+            className="h-10 w-auto md:h-14"
+          />
+          {/* アクセシビリティ用に元見出しは sr-only で残す */}
+          <span className="sr-only">急上昇（ロング優先）</span>
+        </div>
+      </div>
 
       <div className="px-4">
         <FilterBar prefs={prefs} onChange={sync} />
