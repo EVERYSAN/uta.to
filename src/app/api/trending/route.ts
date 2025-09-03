@@ -1,99 +1,149 @@
 // src/app/api/trending/route.ts
-import { NextResponse } from 'next/server'
-import type { Prisma } from '@prisma/client'
-import { prisma } from '@/lib/prisma'
+import { NextResponse } from "next/server";
+import { PrismaClient, Prisma } from "@prisma/client";
 
-type Period = '24h' | '7d' | '30d'
-type Sort = 'trending' | 'support' | 'latest'
+export const runtime = "nodejs";
+export const revalidate = 0;
 
-function sinceFrom(period: Period) {
-  const hours =
-    period === '7d' ? 7 * 24 :
-    period === '30d' ? 30 * 24 : 24
-  return new Date(Date.now() - hours * 3600_000)
+const prisma = new PrismaClient();
+
+function rangeToFrom(range: string | null): Date {
+  const now = new Date();
+  switch ((range ?? "24h").toLowerCase()) {
+    case "24h":
+    case "1d":
+      return new Date(now.getTime() - 24 * 3600_000);
+    case "7d":
+      return new Date(now.getTime() - 7 * 24 * 3600_000);
+    case "30d":
+      return new Date(now.getTime() - 30 * 24 * 3600_000);
+    default:
+      return new Date(now.getTime() - 24 * 3600_000);
+  }
+}
+
+function buildLongOnlyWhere(searchParams: URLSearchParams): Prisma.VideoWhereInput | undefined {
+  if (searchParams.get("shorts") !== "exclude") return undefined;
+  return {
+    AND: [
+      { url: { not: { contains: "/shorts/" } } },
+      { durationSec: { gte: 61 } },
+    ],
+  };
+}
+
+type SupportSums = Record<
+  string,
+  { hearts: number; flames: number; supporters: number; points: number }
+>;
+
+async function loadSupportSums(videoIds: string[], from: Date): Promise<SupportSums> {
+  const rows = await prisma.supportSnapshot.findMany({
+    where: {
+      videoId: { in: videoIds },
+      createdAt: { gte: from },
+    },
+    select: { videoId: true, hearts: true, flames: true, supporters: true },
+  });
+
+  const map: SupportSums = {};
+  for (const id of videoIds) {
+    map[id] = { hearts: 0, flames: 0, supporters: 0, points: 0 };
+  }
+  for (const r of rows) {
+    const cur = map[r.videoId] ?? { hearts: 0, flames: 0, supporters: 0, points: 0 };
+    cur.hearts += r.hearts ?? 0;
+    cur.flames += r.flames ?? 0;
+    cur.supporters += r.supporters ?? 0;
+    cur.points = cur.hearts + cur.flames * 3;
+    map[r.videoId] = cur;
+  }
+  for (const id of Object.keys(map)) {
+    const v = map[id];
+    v.points = (v.hearts ?? 0) + (v.flames ?? 0) * 3;
+  }
+  return map;
+}
+
+/** 急上昇スコア：応援ポイントを時間減衰。ロングに微ブースト。 */
+function calcTrendScore(points: number, publishedAt: Date | null, isLong: boolean, now = new Date()) {
+  const ageHours = Math.max(
+    1,
+    (now.getTime() - (publishedAt ? new Date(publishedAt).getTime() : 0)) / 3600_000
+  );
+  const decay = Math.pow(ageHours / 24, 0.35); // 新しいほど有利
+  const longBoost = isLong ? 1.05 : 1.0;       // ロングに微ブースト（維持）
+  return (points / decay) * longBoost;
 }
 
 export async function GET(req: Request) {
-  const { searchParams } = new URL(req.url)
+  try {
+    const { searchParams } = new URL(req.url);
+    const from = rangeToFrom(searchParams.get("range"));
+    const longOnlyWhere = buildLongOnlyWhere(searchParams);
 
-  const period = (searchParams.get('period') ||
-                  searchParams.get('window') ||
-                  '24h') as Period
+    const where: Prisma.VideoWhereInput = {
+      publishedAt: { gte: from },
+      ...(longOnlyWhere ?? {}),
+    };
 
-  const sort = (searchParams.get('sort') || 'trending') as Sort
+    const videos = await prisma.video.findMany({
+      where,
+      select: {
+        id: true,
+        title: true,
+        url: true,
+        thumbnailUrl: true,
+        channelTitle: true,
+        publishedAt: true,
+        durationSec: true,
+        views: true,
+        likes: true,
+      },
+      orderBy: { publishedAt: "desc" },
+      take: 500,
+    });
 
-  // "1" | "true" | "yes" をオンとして扱う
-  const longOnly =
-    ['1', 'true', 'yes', 'on'].includes(
-      (searchParams.get('long') || '').toLowerCase()
-    )
+    const sums = await loadSupportSums(
+      videos.map((v) => v.id),
+      from
+    );
 
-  const take = Math.min(Math.max(Number(searchParams.get('take') || '60'), 1), 200)
+    const now = new Date();
+    const ranked = videos
+      .map((v) => {
+        const s = sums[v.id] ?? { hearts: 0, flames: 0, supporters: 0, points: 0 };
+        const isLong = (v.durationSec ?? 0) >= 61;
+        const trendScore = calcTrendScore(s.points, v.publishedAt, isLong, now);
+        return {
+          id: v.id,
+          title: v.title,
+          url: v.url,
+          thumbnailUrl: v.thumbnailUrl,
+          channelTitle: v.channelTitle,
+          publishedAt: v.publishedAt,
+          durationSec: v.durationSec,
+          views: v.views ?? 0,
+          likes: v.likes ?? 0,
+          support: s,
+          trendScore,
+        };
+      })
+      // 応援 0 の動画も含めつつ、スコアで並べる
+      .sort((a, b) => b.trendScore - a.trendScore);
 
-  const since = sinceFrom(period)
-
-  const where: Prisma.VideoWhereInput = {
-    // 期間：公開日時で絞り込み（nullを弾かない）
-    publishedAt: { gte: since },
+    return NextResponse.json({
+      ok: true,
+      range: searchParams.get("range") ?? "24h",
+      shorts: searchParams.get("shorts") ?? "include",
+      total: ranked.length,
+      videos: ranked,
+    });
+  } catch (err: any) {
+    console.error("GET /api/trending failed", err);
+    return NextResponse.json(
+      { ok: false, error: err?.message ?? "unknown error" },
+      { status: 500 }
+    );
   }
-
-  if (longOnly) {
-    // ロング動画：Shorts を除外（durationSec が未取得でも除外できる）
-    where.NOT = [
-      { url: { contains: '/shorts/' } },
-      { title: { contains: '#shorts' } },
-    ]
-  }
-
-  const rows = await prisma.video.findMany({
-    where,
-    take,
-    orderBy: { publishedAt: 'desc' }, // 一旦新しい順で取得 → 後で並べ替え
-    select: {
-      id: true,
-      platform: true,
-      platformVideoId: true,
-      title: true,
-      url: true,
-      thumbnailUrl: true,
-      channelTitle: true,
-      publishedAt: true,
-      durationSec: true,
-      // 応援の近似に使う
-      likes: true,
-      views: true,
-    },
-  })
-
-  const nowMs = Date.now()
-
-  // 急上昇スコア（以前の考え方の近似）：(likes+views) / (経過時間/24h)^0.35
-  const items = rows.map(v => {
-    const support = (v.likes ?? 0) + (v.views ?? 0)
-    const pubMs = v.publishedAt ? new Date(v.publishedAt as any).getTime() : nowMs
-    const hours = Math.max(1, (nowMs - pubMs) / 3600_000)
-    let trendScore = support / Math.pow(hours / 24, 0.35)
-    if (longOnly) trendScore *= 1.05 // ロング微ブースト（以前の挙動の名残）
-    return { ...v, support, trendScore }
-  })
-
-  if (sort === 'support') {
-    items.sort((a, b) => (b.support) - (a.support))
-  } else if (sort === 'latest') {
-    items.sort(
-      (a, b) =>
-        new Date(b.publishedAt ?? 0).getTime() -
-        new Date(a.publishedAt ?? 0).getTime()
-    )
-  } else {
-    // trending
-    items.sort((a, b) => b.trendScore - a.trendScore)
-  }
-
-  return NextResponse.json({
-    period,
-    longOnly,
-    count: items.length,
-    items,
-  })
 }
