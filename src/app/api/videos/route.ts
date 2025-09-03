@@ -1,144 +1,153 @@
 // src/app/api/videos/route.ts
-import { NextRequest, NextResponse } from "next/server";
-import prisma from "@/lib/prisma";
+import { NextResponse } from "next/server";
+import { PrismaClient, Prisma } from "@prisma/client";
 
-export const dynamic = "force-dynamic";
+export const runtime = "nodejs";
+export const revalidate = 0;
 
-type Range = "1d" | "7d" | "30d";
-type ShortsMode = "exclude" | "all";
-type SortMode = "trending" | "points";
+const prisma = new PrismaClient();
 
-function parseParams(req: NextRequest) {
-  const sp = req.nextUrl.searchParams;
-  const page = Math.max(1, Number(sp.get("page") || 1));
-  const take = Math.min(48, Math.max(1, Number(sp.get("take") || 24)));
-  const range = (sp.get("range") as Range) || "1d";
-  const shorts = (sp.get("shorts") as ShortsMode) || "exclude";
-  const sort = (sp.get("sort") as SortMode) || "trending";
-  return { page, take, range, shorts, sort };
-}
-
-function rangeToSince(range: Range) {
-  const now = Date.now();
-  const hours = range === "1d" ? 24 : range === "7d" ? 24 * 7 : 24 * 30;
-  return new Date(now - hours * 3600_000);
-}
-
-export async function GET(req: NextRequest) {
-  const { page, take, range, shorts, sort } = parseParams(req);
-  const since = rangeToSince(range);
+/** range -> 取得開始日時 */
+function rangeToFrom(range: string | null): Date {
   const now = new Date();
-
-  // ---- 1) 期間 & Shorts 条件だけで候補を広めに取得（後で JS ソートするため少し多め）
-  const pool = Math.min(600, page * take * 3);
-
-  const whereBase: any = {
-    publishedAt: { gte: since },
-  };
-
-  if (shorts === "exclude") {
-    // URL に /shorts/ を含むものを除外 + 長さが分かる場合 60 秒以上だけ通す
-    whereBase.AND = [
-      { NOT: { url: { contains: "/shorts/" } } },
-      { OR: [{ durationSec: { gte: 60 } }, { durationSec: null }] },
-    ];
+  switch ((range ?? "24h").toLowerCase()) {
+    case "24h":
+    case "1d":
+      return new Date(now.getTime() - 24 * 3600_000);
+    case "7d":
+      return new Date(now.getTime() - 7 * 24 * 3600_000);
+    case "30d":
+      return new Date(now.getTime() - 30 * 24 * 3600_000);
+    default:
+      return new Date(now.getTime() - 24 * 3600_000);
   }
+}
 
-  const candidates = await prisma.video.findMany({
-    where: whereBase,
-    orderBy: { publishedAt: "desc" }, // フォールバック並び
-    take: pool,
+/** shorts 除外 + ロング(61s〜)のみ の where を作る */
+function buildLongOnlyWhere(searchParams: URLSearchParams): Prisma.VideoWhereInput | undefined {
+  // UI は「ロング動画」= shorts を除外する仕様なので、クエリは shorts=exclude を見る
+  const shortsParam = searchParams.get("shorts"); // "exclude" | null
+  if (shortsParam !== "exclude") return undefined;
+
+  // url はスキーマ上 non-null のはずなので null 比較は使わない（型エラーの原因）
+  return {
+    AND: [
+      { url: { not: { contains: "/shorts/" } } }, // /shorts/ を含む URL を除外
+      { durationSec: { gte: 61 } },               // 閾値は 61 秒以上
+    ],
+  };
+}
+
+/** 応援ポイント（集計） */
+type SupportSums = Record<
+  string,
+  { hearts: number; flames: number; supporters: number; points: number }
+>;
+
+/** SupportSnapshot を集計して videoId -> 合計 を返す（無ければ 0） */
+async function loadSupportSums(videoIds: string[], from: Date): Promise<SupportSums> {
+  // SupportSnapshot スキーマは、hearts / flames / supporters がある前提。
+  // 型崩れを避けるため groupBy を使わず findMany→手動集計にしている。
+  const rows = await prisma.supportSnapshot.findMany({
+    where: {
+      videoId: { in: videoIds },
+      createdAt: { gte: from },
+    },
     select: {
-      id: true,
-      title: true,
-      url: true,
-      platform: true,
-      platformVideoId: true,
-      thumbnailUrl: true,
-      channelTitle: true,
-      durationSec: true,
-      publishedAt: true,
-      // フロントで表示している累計系
-      views: true,
-      likes: true,
-      description: true,
+      videoId: true,
+      hearts: true,
+      flames: true,
+      supporters: true,
     },
   });
 
-  if (candidates.length === 0) {
-    return NextResponse.json({ ok: true, items: [], page, take, total: 0 });
+  const map: SupportSums = {};
+  for (const id of videoIds) {
+    map[id] = { hearts: 0, flames: 0, supporters: 0, points: 0 };
   }
+  for (const r of rows) {
+    const cur = map[r.videoId] ?? { hearts: 0, flames: 0, supporters: 0, points: 0 };
+    cur.hearts += r.hearts ?? 0;
+    cur.flames += r.flames ?? 0;
+    cur.supporters += r.supporters ?? 0;
+    // 重みはハート=1, 炎=3（以前の表示と相性が良い）
+    cur.points = cur.hearts + cur.flames * 3;
+    map[r.videoId] = cur;
+  }
+  // points を最後に整合
+  for (const id of Object.keys(map)) {
+    const v = map[id];
+    v.points = (v.hearts ?? 0) + (v.flames ?? 0) * 3;
+  }
+  return map;
+}
 
-  const ids = candidates.map((v) => v.id);
-
-  // ---- 2) SupportSnapshot を「左集計」して 0 を許容
-  // NOTE: スキーマのカラム名が違う場合は createdAt/points を合わせてください。
-  let sums: Array<{ videoId: string; _sum: { points: number | null } }> = [];
+export async function GET(req: Request) {
   try {
-    sums = await (prisma as any).supportSnapshot.groupBy({
-      by: ["videoId"],
-      where: {
-        videoId: { in: ids },
-        createdAt: { gte: since }, // ← snapshot タイムスタンプ列名
+    const { searchParams } = new URL(req.url);
+    const from = rangeToFrom(searchParams.get("range"));
+    const longOnlyWhere = buildLongOnlyWhere(searchParams);
+
+    // 1) まずは対象動画を取得（公開日時フィルタは DB 側で、ロング/shorts は必要な時のみ）
+    const baseWhere: Prisma.VideoWhereInput = {
+      publishedAt: { gte: from },
+      ...(longOnlyWhere ?? {}),
+    };
+
+    const videos = await prisma.video.findMany({
+      where: baseWhere,
+      select: {
+        id: true,
+        title: true,
+        url: true,
+        thumbnailUrl: true,
+        channelTitle: true,
+        publishedAt: true,
+        durationSec: true,
+        views: true,
+        likes: true,
       },
-      _sum: { points: true }, // ← 期間内の応援ポイント合計の列名
+      orderBy: { publishedAt: "desc" }, // 一旦新しい順で拾う（最終ソートは後で応援ポイントで）
+      take: 500, // 安全のため上限
     });
-  } catch {
-    // スナップショット未作成でも動くように（全部 0 扱い）
-    sums = [];
-  }
 
-  const supportMap = new Map<string, number>();
-  for (const row of sums) supportMap.set(row.videoId, row._sum.points ?? 0);
-
-  // ---- 3) スコア計算 & 並び替え
-  const scored = candidates.map((v) => {
-    const supportInRange = supportMap.get(v.id) ?? 0;
-    const publishedAt = v.publishedAt ? new Date(v.publishedAt) : now;
-    const hoursSince = Math.max(1, (now.getTime() - publishedAt.getTime()) / 3600_000);
-
-    // 急上昇スコア：期間内応援に時間減衰（新しいほど強い）
-    let trendingScore = supportInRange / Math.pow(hoursSince / 24, 0.35);
-
-    return { ...v, supportInRange, _score: trendingScore };
-  });
-
-  if (sort === "points") {
-    scored.sort(
-      (a, b) =>
-        (b.supportInRange ?? 0) - (a.supportInRange ?? 0) ||
-        new Date(b.publishedAt ?? 0).getTime() - new Date(a.publishedAt ?? 0).getTime()
+    // 2) SupportSnapshot を左外部結合相当で集計
+    const sums = await loadSupportSums(
+      videos.map((v) => v.id),
+      from
     );
-  } else {
-    scored.sort(
-      (a, b) =>
-        (b._score ?? 0) - (a._score ?? 0) ||
-        new Date(b.publishedAt ?? 0).getTime() - new Date(a.publishedAt ?? 0).getTime()
+
+    // 3) マージして応援ポイント降順に整列（= 応援順）
+    const list = videos
+      .map((v) => {
+        const s = sums[v.id] ?? { hearts: 0, flames: 0, supporters: 0, points: 0 };
+        return {
+          id: v.id,
+          title: v.title,
+          url: v.url,
+          thumbnailUrl: v.thumbnailUrl,
+          channelTitle: v.channelTitle,
+          publishedAt: v.publishedAt,
+          durationSec: v.durationSec,
+          views: v.views ?? 0,
+          likes: v.likes ?? 0,
+          support: s,
+        };
+      })
+      .sort((a, b) => b.support.points - a.support.points);
+
+    return NextResponse.json({
+      ok: true,
+      range: searchParams.get("range") ?? "24h",
+      shorts: searchParams.get("shorts") ?? "include",
+      total: list.length,
+      videos: list,
+    });
+  } catch (err: any) {
+    console.error("GET /api/videos failed", err);
+    return NextResponse.json(
+      { ok: false, error: err?.message ?? "unknown error" },
+      { status: 500 }
     );
   }
-
-  // ランクは全体順位から計算（ページ外も含めて順位づけ）
-  const rankMap = new Map<string, number>();
-  scored.forEach((v, i) => rankMap.set(v.id, i + 1));
-
-  const total = scored.length;
-  const start = (page - 1) * take;
-  const slice = scored.slice(start, start + take).map((v) => ({
-    id: v.id,
-    title: v.title,
-    url: v.url,
-    platform: v.platform,
-    platformVideoId: v.platformVideoId,
-    thumbnailUrl: v.thumbnailUrl,
-    channelTitle: v.channelTitle,
-    durationSec: v.durationSec,
-    publishedAt: v.publishedAt as any, // -> フロントは string | null で受ける
-    views: v.views,
-    likes: v.likes,
-    description: v.description,
-    supportInRange: v.supportInRange ?? 0,
-    trendingRank: rankMap.get(v.id) ?? null,
-  }));
-
-  return NextResponse.json({ ok: true, items: slice, page, take, total });
 }
