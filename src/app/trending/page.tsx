@@ -39,12 +39,12 @@ type Video = {
   channelTitle: string | null;
   views: number | null;
   likes: number | null;
-  supportPoints?: number | null;
+  supportInRange?: number | null; // 期間内応援ポイント
   trendingRank?: number | null;
 };
 type ApiList = { ok: boolean; items: Video[]; page?: number; take?: number; total?: number };
 
-/* ===== “続きから” ===== */
+/* ===== last video (任意) ===== */
 function ContinueFromHistory() {
   const [h, setH] = useState<{ videoId: string; title?: string; at: number } | null>(null);
   useEffect(() => {
@@ -65,7 +65,7 @@ function ContinueFromHistory() {
   );
 }
 
-/* ===== バッジ ===== */
+/* ===== badge ===== */
 function TrendingBadge({ rank, label }: { rank?: number | null; label: string }) {
   const txt = rank ? `#${rank}` : "急上昇";
   return (
@@ -77,8 +77,8 @@ function TrendingBadge({ rank, label }: { rank?: number | null; label: string })
   );
 }
 
-/* ===== カード ===== */
-function VideoCard({ v, label }: { v: Video; label: string }) {
+/* ===== card ===== */
+function VideoCard({ v, rangeLabel }: { v: Video; rangeLabel: string }) {
   return (
     <Link
       href={`/v/${v.id}`}
@@ -104,7 +104,7 @@ function VideoCard({ v, label }: { v: Video; label: string }) {
 
       <div className="p-3 space-y-2">
         <div className="flex items-center justify-between gap-2">
-          <TrendingBadge rank={v.trendingRank ?? null} label={label} />
+          <TrendingBadge rank={v.trendingRank ?? null} label={rangeLabel} />
           <span className="text-[11px] text-zinc-400">{fmtDate(v.publishedAt)}</span>
         </div>
         <h3 className="text-sm font-semibold leading-snug line-clamp-2 text-zinc-100">
@@ -113,37 +113,29 @@ function VideoCard({ v, label }: { v: Video; label: string }) {
         <div className="flex items-center gap-3 text-[12px] text-zinc-400">
           <span>👁 {fmtCount(v.views)}</span>
           <span>❤️ {fmtCount(v.likes)}</span>
-          {typeof v.supportPoints === "number" && <span>🔥 応援 {fmtCount(v.supportPoints)}</span>}
-          {v.channelTitle && <span className="ml-auto truncate max-w-[50%] text-zinc-300">🎤 {v.channelTitle}</span>}
+          <span>🔥 {rangeLabel === "24時間" ? "今日の応援" : `${rangeLabel}の応援`} {fmtCount(v.supportInRange ?? 0)}</span>
+          {v.channelTitle && (
+            <span className="ml-auto truncate max-w-[50%] text-zinc-300">🎤 {v.channelTitle}</span>
+          )}
         </div>
       </div>
     </Link>
   );
 }
 
-/* ===== フィルタバー ===== */
+/* ===== filters ===== */
 type Range = "1d" | "7d" | "30d";
 type ShortsMode = "exclude" | "all";
 type SortMode = "trending" | "points" | "newest";
 type Prefs = { range: Range; shorts: ShortsMode; sort: SortMode };
 const PREFS_KEY = "video:prefs";
 
-function FilterBar({
-  prefs,
-  onChange,
-}: {
-  prefs: Prefs;
-  onChange: (next: Partial<Prefs>) => void;
-}) {
+function FilterBar({ prefs, onChange }: { prefs: Prefs; onChange: (next: Partial<Prefs>) => void }) {
   const Btn = ({
     active,
     children,
     onClick,
-  }: {
-    active: boolean;
-    children: React.ReactNode;
-    onClick: () => void;
-  }) => (
+  }: { active: boolean; children: React.ReactNode; onClick: () => void }) => (
     <button
       onClick={onClick}
       className={`px-3 py-1.5 rounded-full text-sm ${
@@ -157,15 +149,9 @@ function FilterBar({
   return (
     <div className="flex flex-wrap items-center gap-2">
       {/* range */}
-      <Btn active={prefs.range === "1d"} onClick={() => onChange({ range: "1d" })}>
-        24h
-      </Btn>
-      <Btn active={prefs.range === "7d"} onClick={() => onChange({ range: "7d" })}>
-        7日
-      </Btn>
-      <Btn active={prefs.range === "30d"} onClick={() => onChange({ range: "30d" })}>
-        30日
-      </Btn>
+      <Btn active={prefs.range === "1d"} onClick={() => onChange({ range: "1d" })}>24h</Btn>
+      <Btn active={prefs.range === "7d"} onClick={() => onChange({ range: "7d" })}>7日</Btn>
+      <Btn active={prefs.range === "30d"} onClick={() => onChange({ range: "30d" })}>30日</Btn>
 
       {/* shorts */}
       <div className="ml-2 inline-flex rounded-full bg-zinc-800 p-1">
@@ -179,15 +165,9 @@ function FilterBar({
 
       {/* sort */}
       <div className="ml-2 inline-flex rounded-full bg-zinc-800 p-1">
-        <Btn active={prefs.sort === "trending"} onClick={() => onChange({ sort: "trending" })}>
-          急上昇
-        </Btn>
-        <Btn active={prefs.sort === "points"} onClick={() => onChange({ sort: "points" })}>
-          応援順
-        </Btn>
-        <Btn active={prefs.sort === "newest"} onClick={() => onChange({ sort: "newest" })}>
-          新着順
-        </Btn>
+        <Btn active={prefs.sort === "trending"} onClick={() => onChange({ sort: "trending" })}>急上昇</Btn>
+        <Btn active={prefs.sort === "points"} onClick={() => onChange({ sort: "points" })}>応援順</Btn>
+        <Btn active={prefs.sort === "newest"} onClick={() => onChange({ sort: "newest" })}>新着順</Btn>
       </div>
     </div>
   );
@@ -199,7 +179,6 @@ export default function TrendingPage() {
   const router = useRouter();
   const pathname = usePathname();
 
-  // URL / localStorage から初期値
   const saved = useMemo(() => {
     try {
       return JSON.parse(localStorage.getItem(PREFS_KEY) || "{}") as Partial<Prefs>;
@@ -207,6 +186,7 @@ export default function TrendingPage() {
       return {};
     }
   }, []);
+
   const init: Prefs = {
     range: ((search.get("range") as Range) ?? (saved.range as Range) ?? "1d"),
     shorts: ((search.get("shorts") as ShortsMode) ?? (saved.shorts as ShortsMode) ?? "exclude"),
@@ -220,7 +200,8 @@ export default function TrendingPage() {
   const [loading, setLoading] = useState(false);
   const sentinelRef = useRef<HTMLDivElement | null>(null);
 
-  // URL & localStorage 同期
+  const rangeLabel = prefs.range === "1d" ? "24時間" : prefs.range === "7d" ? "7日間" : "30日間";
+
   const sync = (next?: Partial<Prefs>) => {
     const merged: Prefs = { ...prefs, ...(next || {}) };
     const qs = new URLSearchParams(search.toString());
@@ -232,7 +213,6 @@ export default function TrendingPage() {
     setPrefs(merged);
   };
 
-  // データ取得
   async function fetchPage(p: number, replace = false) {
     if (loading || (!replace && !hasMore)) return;
     setLoading(true);
@@ -240,25 +220,23 @@ export default function TrendingPage() {
       const qs = new URLSearchParams();
       qs.set("page", String(p));
       qs.set("take", "24");
-      // 既存 /api/videos に合わせたパラメータ（未対応でも無害）
-      qs.set("range", prefs.range);          // "1d" | "7d" | "30d"
-      qs.set("shorts", prefs.shorts);        // "exclude" | "all"
-      qs.set("sort", prefs.sort);            // "trending" | "points" | "newest"
+      qs.set("range", prefs.range);
+      qs.set("shorts", prefs.shorts);
+      qs.set("sort", prefs.sort);
 
       const res = await fetch(`/api/videos?${qs.toString()}`, { cache: "no-store" });
       const json: ApiList = await res.json();
       const rows = json?.items ?? [];
       setItems((prev) => (replace ? rows : [...prev, ...rows]));
       if (rows.length < 24) setHasMore(false);
-    } catch (e) {
-      console.warn(e);
+    } catch {
       setHasMore(false);
     } finally {
       setLoading(false);
     }
   }
 
-  // 条件が変わったらリセットして再取得
+  // 条件変化でリセット
   useEffect(() => {
     setItems([]);
     setPage(1);
@@ -287,9 +265,6 @@ export default function TrendingPage() {
     return () => ob.disconnect();
   }, [page, loading, hasMore]);
 
-  const label =
-    prefs.range === "1d" ? "24時間" : prefs.range === "7d" ? "7日間" : "30日間";
-
   return (
     <main className="mx-auto max-w-7xl px-4 py-6 space-y-4">
       <div className="flex items-center justify-between">
@@ -301,7 +276,7 @@ export default function TrendingPage() {
 
       <section className="grid gap-4 grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4">
         {items.map((v) => (
-          <VideoCard key={v.id} v={v} label={label} />
+          <VideoCard key={v.id} v={v} rangeLabel={rangeLabel} />
         ))}
       </section>
 
