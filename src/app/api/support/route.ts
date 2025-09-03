@@ -22,7 +22,7 @@ export async function POST(req: Request) {
     }
 
     // 指紋 & JSTの本日0時（UTC換算）
-    const { hash: ipHash, ua } = getRequestFingerprint(req);
+    const { hash: ipHash } = getRequestFingerprint(req);
     const since = startOfTodayJSTUtc();
 
     // 既に本日押していれば何もしない
@@ -38,9 +38,9 @@ export async function POST(req: Request) {
       return Response.json({ ok: true, already: true, points: v?.supportPoints ?? 0 });
     }
 
-    // 記録 & 集計をトランザクションで
+    // 記録 & 集計をトランザクションで（userAgent は保存しない）
     await prisma.$transaction([
-      prisma.supportEvent.create({ data: { videoId, amount, ipHash, userAgent: ua } }),
+      prisma.supportEvent.create({ data: { videoId, amount, ipHash } }),
       prisma.video.update({ where: { id: videoId }, data: { supportPoints: { increment: amount } } }),
     ]);
 
