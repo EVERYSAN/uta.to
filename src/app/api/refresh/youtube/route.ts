@@ -1,11 +1,9 @@
-// src/app/api/refresh/youtube/route.ts
 import { NextResponse } from "next/server";
 import prisma from "@/lib/prisma";
+import type { Prisma } from "@prisma/client";
 
-// Prisma を使うので Edge ではなく Node.js で実行
 export const runtime = "nodejs";
 
-// 環境変数名はどちらでも拾えるように
 const YT_KEY =
   process.env.YT_API_KEY ||
   process.env.YOUTUBE_API_KEY ||
@@ -25,13 +23,11 @@ type YtSearchItem = {
 export async function GET(req: Request) {
   const url = new URL(req.url);
 
-  // デフォルト：直近6時間、最大 32 件、クエリ未指定
   const hours = Math.max(1, Math.min(48, Number(url.searchParams.get("hours")) || 6));
   const limit = Math.max(1, Math.min(50, Number(url.searchParams.get("limit")) || 32));
   const query = (url.searchParams.get("query") || process.env.YT_DEFAULT_QUERY || "").trim();
 
   if (!YT_KEY) {
-    // 500 を返さず 200 + ok:false で返す
     return NextResponse.json(
       { ok: false, route: "refresh/youtube", error: "Missing YT_API_KEY (or YOUTUBE_API_KEY)" },
       { status: 200 }
@@ -40,7 +36,6 @@ export async function GET(req: Request) {
 
   const publishedAfter = new Date(Date.now() - hours * 3600 * 1000).toISOString();
 
-  // YouTube Data API: search.list
   const params = new URLSearchParams({
     key: YT_KEY,
     part: "snippet",
@@ -48,15 +43,12 @@ export async function GET(req: Request) {
     order: "date",
     maxResults: String(limit),
     publishedAfter,
-    // q は空の時に付けない（空文字は 400 の原因になりがち）
   });
 
   if (query) {
     params.set("q", query);
   } else {
-    // クエリが無い時は「音楽カテゴリ」に絞る（Music = 10）
-    params.set("videoCategoryId", "10");
-    // 地域を指定したい場合は環境変数で
+    params.set("videoCategoryId", "10"); // Music
     if (process.env.YT_REGION_CODE) params.set("regionCode", process.env.YT_REGION_CODE);
   }
 
@@ -66,7 +58,6 @@ export async function GET(req: Request) {
     const res = await fetch(apiUrl, { cache: "no-store" });
     if (!res.ok) {
       const text = await res.text().catch(() => "");
-      // ここで 500 にせず、内容を返す
       return NextResponse.json(
         {
           ok: false,
@@ -81,44 +72,47 @@ export async function GET(req: Request) {
 
     const json: { items?: YtSearchItem[] } = await res.json();
     const items = json.items ?? [];
-
-    // 取り出し & Upsert
     let upserts = 0;
+
     for (const it of items) {
       const videoId =
-        typeof it.id === "string"
-          ? it.id
-          : it.id?.videoId || ""; // search は id.videoId
+        typeof it.id === "string" ? it.id : it.id?.videoId || "";
       if (!videoId) continue;
 
       const title = it.snippet?.title || `video ${videoId}`;
       const channelTitle = it.snippet?.channelTitle || undefined;
-      const publishedAt = it.snippet?.publishedAt ? new Date(it.snippet!.publishedAt!) : undefined;
+      const publishedAt = it.snippet?.publishedAt
+        ? new Date(it.snippet.publishedAt)
+        : undefined;
       const thumb =
-        it.snippet?.thumbnails?.high?.url ||
-        it.snippet?.thumbnails?.medium?.url ||
+        it.snippet?.thumbnails?.high?.url ??
+        it.snippet?.thumbnails?.medium?.url ??
         undefined;
-
       const url = `https://www.youtube.com/watch?v=${videoId}`;
+
+      // ---- ここがポイント：値があるときだけプロパティを含める ----
+      const createData: Prisma.VideoCreateInput = {
+        platform: "youtube",
+        platformVideoId: videoId,
+        title,
+        url,
+        ...(channelTitle ? { channelTitle } : {}),
+        ...(publishedAt ? { publishedAt } : {}),
+        ...(thumb ? { thumbnailUrl: thumb } : {}),
+      };
+
+      const updateData: Prisma.VideoUpdateInput = {
+        title,
+        url,
+        ...(channelTitle ? { channelTitle } : {}),
+        ...(publishedAt ? { publishedAt } : {}),
+        ...(thumb ? { thumbnailUrl: thumb } : {}),
+      };
 
       await prisma.video.upsert({
         where: { platform_platformVideoId: { platform: "youtube", platformVideoId: videoId } },
-        create: {
-          platform: "youtube",
-          platformVideoId: videoId,
-          title,
-          channelTitle,
-          publishedAt,
-          thumbnailUrl: thumb,
-          url,
-        },
-        update: {
-          title,
-          channelTitle,
-          publishedAt,
-          thumbnailUrl: thumb,
-          url,
-        },
+        create: createData,
+        update: updateData,
       });
 
       upserts++;
@@ -134,13 +128,8 @@ export async function GET(req: Request) {
       usedQuery: query || null,
     });
   } catch (e: any) {
-    // 例外でも 200 で返す（スナップショット全体が落ちないように）
     return NextResponse.json(
-      {
-        ok: false,
-        route: "refresh/youtube",
-        error: e?.message || String(e),
-      },
+      { ok: false, route: "refresh/youtube", error: e?.message || String(e) },
       { status: 200 }
     );
   }
