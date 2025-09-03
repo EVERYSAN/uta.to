@@ -1,131 +1,112 @@
-import { NextRequest, NextResponse } from "next/server";
-import { Prisma, PrismaClient } from "@prisma/client";
+// src/app/api/videos/route.ts
+import { NextResponse } from "next/server";
+import { prisma } from "@/lib/prisma";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
-export const revalidate = 0;
 
-const prisma = new PrismaClient();
+type Range = "24h" | "7d" | "30d";
+type Shorts = "any" | "only" | "exclude" | "long";
+type Sort = "trending" | "support" | "latest" | "popular";
 
-// range=24h|7d|30d
-function parseRange(raw: string | null): { from: Date; label: "24h"|"7d"|"30d" } {
-  const now = Date.now();
-  const v = (raw ?? "24h").toLowerCase();
-  if (v.startsWith("7"))  return { from: new Date(now - 7  * 24 * 3600_000), label: "7d"  };
-  if (v.startsWith("30")) return { from: new Date(now - 30 * 24 * 3600_000), label: "30d" };
-  return { from: new Date(now - 24 * 3600_000), label: "24h" };
+function parseParams(url: URL) {
+  const range = (url.searchParams.get("range") as Range) || "24h";
+  const shorts = (url.searchParams.get("shorts") as Shorts) || "any";
+  const sort = (url.searchParams.get("sort") as Sort) || "trending";
+  const page = Math.max(1, Number(url.searchParams.get("page") ?? "1"));
+  const take = Math.min(60, Math.max(1, Number(url.searchParams.get("take") ?? "24")));
+
+  const now = new Date();
+  const from = new Date(now);
+  if (range === "24h") from.setHours(now.getHours() - 24);
+  else if (range === "7d") from.setDate(now.getDate() - 7);
+  else if (range === "30d") from.setDate(now.getDate() - 30);
+
+  return { range, shorts, sort, page, take, from };
 }
 
-// long/short を durationSec 基準で付与
-function applyShorts(where: Prisma.VideoWhereInput, mode: string | null) {
-  const m = (mode ?? "any").toLowerCase(); // any|only|exclude|long
-  if (m === "only") {
-    where.durationSec = { lt: 60 };
-  } else if (m === "exclude") {
-    // ロング or 不明(null) を許可
-    where.OR = [{ durationSec: { gte: 61 } }, { durationSec: null as any }];
-  } else if (m === "long") {
-    where.durationSec = { gte: 61 };
-  }
-}
-
-async function supportTableExists(): Promise<boolean> {
+export async function GET(req: Request) {
   try {
-    // public."SupportSnapshot" が存在するか
-    const rows = await prisma.$queryRawUnsafe<{ exists: boolean }[]>(
-      `SELECT to_regclass('public."SupportSnapshot"') IS NOT NULL AS exists`
-    );
-    return Boolean(rows?.[0]?.exists);
-  } catch {
-    return false;
-  }
-}
+    const url = new URL(req.url);
+    const { shorts, sort, page, take, from } = parseParams(url);
 
-async function getSupportPointsMap(from: Date): Promise<Record<string, number>> {
-  if (!(await supportTableExists())) return {};
-  // 列が無い環境でも落ちないよう、存在する列だけ合算する
-  try {
-    const rows: Array<{ videoId: string; points: number }> = await prisma.$queryRawUnsafe(
-      `
-      WITH cols AS (
-        SELECT array_agg(column_name) AS cols
-          FROM information_schema.columns
-         WHERE table_schema = 'public' AND table_name = 'SupportSnapshot'
-      )
-      SELECT "videoId",
-             SUM(
-               (CASE WHEN 'hearts'     = ANY((SELECT cols FROM cols)) THEN COALESCE("hearts",0)     ELSE 0 END) * 1 +
-               (CASE WHEN 'flames'     = ANY((SELECT cols FROM cols)) THEN COALESCE("flames",0)     ELSE 0 END) * 3 +
-               (CASE WHEN 'supporters' = ANY((SELECT cols FROM cols)) THEN COALESCE("supporters",0) ELSE 0 END) * 5 +
-               (CASE WHEN 'likes'      = ANY((SELECT cols FROM cols)) THEN COALESCE("likes",0)      ELSE 0 END) * 0
-             )::float AS points
-        FROM "SupportSnapshot"
-       WHERE "createdAt" >= $1
-       GROUP BY "videoId"
-      `,
-      from
-    );
-    return Object.fromEntries(rows.map(r => [r.videoId, Number(r.points) || 0]));
-  } catch {
-    // それでも失敗したら 0 扱い
-    return {};
-  }
-}
+    // where 句（スキーマ互換のみ使用）
+    const where: any = {
+      publishedAt: { gte: from },
+    };
 
-export async function GET(req: NextRequest) {
-  try {
-    const { searchParams } = new URL(req.url);
+    // shorts フィルタ（url の null 判定などは使わない）
+    if (shorts === "only") {
+      where.durationSec = { lte: 60 };
+    } else if (shorts === "exclude" || shorts === "long") {
+      // 仕様: 61秒以上をロング
+      where.durationSec = { gte: 61 };
+    }
+    const skip = (page - 1) * take;
 
-    const page  = Math.max(1, parseInt(searchParams.get("page") || "1", 10));
-    const take  = Math.min(50, Math.max(1, parseInt(searchParams.get("take") || "24", 10)));
-    const skip  = (page - 1) * take;
-    const sort  = (searchParams.get("sort") || "trending").toLowerCase(); // trending|support|latest|popular
-    const { from, label } = parseRange(searchParams.get("range"));
-    const shorts = searchParams.get("shorts"); // any|only|exclude|long
+    // 並び替えの既定（急上昇以外は DB 並び替え）
+    let orderBy: any = undefined;
+    if (sort === "latest") orderBy = { publishedAt: "desc" };
+    else if (sort === "popular") orderBy = { views: "desc" };
+    else if (sort === "support") orderBy = { likes: "desc" };
 
-    const where: Prisma.VideoWhereInput = { publishedAt: { gte: from } };
-    applyShorts(where, shorts);
+    // 返すフィールド
+    const select = {
+      id: true,
+      title: true,
+      thumbnailUrl: true,
+      channelTitle: true,
+      publishedAt: true,
+      durationSec: true,
+      views: true,
+      likes: true,
+      url: true,
+    };
 
-    // 候補を多めに取得
-    const candidates = await prisma.video.findMany({
-      where,
-      orderBy: { publishedAt: "desc" },
-      take: Math.max(skip + take, 200),
-      select: {
-        id: true, title: true, url: true, channelTitle: true,
-        thumbnailUrl: true, publishedAt: true, durationSec: true,
-        views: true, likes: true,
-      },
+    // 急上昇のみアプリ側でスコア計算
+    if (sort === "trending") {
+      const poolSize = Math.max(take * 6, 120); // 少し多めに候補を取る
+      const pool = await prisma.video.findMany({
+        where,
+        orderBy: { publishedAt: "desc" }, // 新しい順に候補
+        take: poolSize,
+        select,
+      });
+
+      const now = Date.now();
+      const scored = pool.map((v) => {
+        const ageHours = Math.max(1, (now - new Date(v.publishedAt).getTime()) / 3600000);
+        // 応援データが無くても動く簡易スコア
+        const base = (v.likes ?? 0) + (v.views ?? 0) / 50;
+        const trendScore = base / Math.pow(ageHours / 24, 0.35); // ゆるやか減衰
+        return { ...v, trendScore };
+      });
+
+      scored.sort((a, b) => b.trendScore - a.trendScore);
+      const items = scored.slice(skip, skip + take);
+      return NextResponse.json({
+        ok: true,
+        meta: { page, take, total: scored.length, sort: "trending" },
+        items,
+      });
+    }
+
+    // それ以外は DB 側で並び替え
+    const [total, items] = await Promise.all([
+      prisma.video.count({ where }),
+      prisma.video.findMany({ where, orderBy, skip, take, select }),
+    ]);
+
+    return NextResponse.json({
+      ok: true,
+      meta: { page, take, total, sort },
+      items,
     });
-
-    const supportMap = await getSupportPointsMap(from);
-
-    // 急上昇スコア
-    const now = Date.now();
-    const withScore = candidates.map(v => {
-      const published = (v.publishedAt ? new Date(v.publishedAt) : new Date()).getTime();
-      const hours = Math.max(1, (now - published) / 3600_000);
-      const support = supportMap[v.id] || 0;
-      const views = Number(v.views || 0);
-      const likes = Number(v.likes || 0);
-      const decay = Math.pow(hours / 24, 0.35);
-      const score = (support * 1.0 + likes * 0.5 + Math.sqrt(views)) / decay;
-      return { ...v, support, score };
-    });
-
-    // 並び替え
-    let sorted = withScore;
-    if (sort === "latest")      sorted = [...withScore].sort((a,b) => Number(b.publishedAt) - Number(a.publishedAt));
-    else if (sort === "popular")sorted = [...withScore].sort((a,b) => (b.views || 0) - (a.views || 0));
-    else if (sort === "support")sorted = [...withScore].sort((a,b) => b.support - a.support);
-    else                        sorted = [...withScore].sort((a,b) => b.score - a.score); // trending
-
-    const total = sorted.length;
-    const items = sorted.slice(skip, skip + take);
-
-    return NextResponse.json({ ok: true, meta: { range: label, page, take, total }, items });
   } catch (e: any) {
-    console.error("API /api/videos error:", e);
-    return NextResponse.json({ ok: false, error: String(e?.message ?? e) }, { status: 500 });
+    console.error("[/api/videos] error:", e);
+    return NextResponse.json(
+      { ok: false, error: e?.message ?? "Internal Error" },
+      { status: 500 }
+    );
   }
 }
