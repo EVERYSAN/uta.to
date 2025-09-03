@@ -1,94 +1,86 @@
-// src/app/api/trending/route.ts
-import { NextResponse } from "next/server";
-import { PrismaClient, Prisma } from "@prisma/client";
+import { NextRequest, NextResponse } from "next/server";
+import { prisma } from "@/lib/prisma";
+// ↑ prisma のパスはプロジェクトの実体に合わせてください
 
-export const runtime = "nodejs";
-export const revalidate = 0;
+type RangeKey = "24h" | "7d" | "30d";
 
-const prisma = new PrismaClient();
-
-function rangeToFrom(range: string | null): Date {
+function getRange(range: string | null): { from: Date; windowHours: number } {
   const now = new Date();
-  switch ((range ?? "24h").toLowerCase()) {
-    case "24h":
-    case "1d":
-      return new Date(now.getTime() - 24 * 3600_000);
+  switch ((range as RangeKey) ?? "7d") {
+    case "24h": {
+      const from = new Date(now.getTime() - 24 * 60 * 60 * 1000);
+      return { from, windowHours: 24 };
+    }
+    case "30d": {
+      const from = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
+      return { from, windowHours: 30 * 24 };
+    }
     case "7d":
-      return new Date(now.getTime() - 7 * 24 * 3600_000);
-    case "30d":
-      return new Date(now.getTime() - 30 * 24 * 3600_000);
-    default:
-      return new Date(now.getTime() - 24 * 3600_000);
+    default: {
+      const from = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
+      return { from, windowHours: 7 * 24 };
+    }
   }
 }
 
-function buildLongOnlyWhere(searchParams: URLSearchParams): Prisma.VideoWhereInput | undefined {
-  if (searchParams.get("shorts") !== "exclude") return undefined;
-  return {
-    AND: [
-      { url: { not: { contains: "/shorts/" } } },
-      { durationSec: { gte: 61 } },
-    ],
-  };
+/** スナップショット1行から各カウントを取り出す（フィールド名の差異に耐える） */
+function countsFromSnap(row: any) {
+  const hearts =
+    Number(row?.hearts ?? row?.heart ?? row?.heartsDelta ?? row?.heartDelta ?? row?.likes ?? 0) || 0;
+  const flames =
+    Number(row?.flames ?? row?.flame ?? row?.flamesDelta ?? row?.flameDelta ?? row?.fires ?? 0) || 0;
+  const supporters =
+    Number(
+      row?.supporters ??
+        row?.support ??
+        row?.supportersDelta ??
+        row?.supportDelta ??
+        row?.cheers ??
+        row?.boosts ??
+        0
+    ) || 0;
+
+  return { hearts, flames, supporters };
 }
 
-type SupportSums = Record<
-  string,
-  { hearts: number; flames: number; supporters: number; points: number }
->;
+function supportScore(sum: { hearts: number; flames: number; supporters: number }) {
+  // 重み付けは従来通り：❤️=1, 🔥=2, 応援=3
+  return sum.hearts + 2 * sum.flames + 3 * sum.supporters;
+}
 
-async function loadSupportSums(videoIds: string[], from: Date): Promise<SupportSums> {
-  const rows = await prisma.supportSnapshot.findMany({
+export async function GET(req: NextRequest) {
+  const { searchParams } = new URL(req.url);
+  const range = (searchParams.get("range") as RangeKey) ?? "7d";
+  const sort = (searchParams.get("sort") ?? "trending") as "trending" | "support";
+  const longOnly =
+    ["1", "true", "yes"].includes((searchParams.get("long") || "").toLowerCase()) ||
+    ["long", "1"].includes((searchParams.get("type") || "").toLowerCase());
+  const excludeShorts = (searchParams.get("shorts") || "").toLowerCase() === "exclude";
+
+  const { from, windowHours } = getRange(range);
+
+  // Video 側のフィルタを relation 経由で適用
+  const videoAND: any[] = [];
+  if (longOnly) videoAND.push({ durationSec: { gte: 61 } });
+  if (excludeShorts) videoAND.push({ NOT: { url: { contains: "/shorts/" } } });
+
+  // SupportSnapshot を時間範囲で取得（select は付けずにスキーマ差異を回避）
+  const snapshots = await prisma.supportSnapshot.findMany({
     where: {
-      videoId: { in: videoIds },
       createdAt: { gte: from },
+      ...(videoAND.length ? { video: { AND: videoAND } } : {}),
     },
-    select: { videoId: true, hearts: true, flames: true, supporters: true },
   });
 
-  const map: SupportSums = {};
-  for (const id of videoIds) {
-    map[id] = { hearts: 0, flames: 0, supporters: 0, points: 0 };
-  }
-  for (const r of rows) {
-    const cur = map[r.videoId] ?? { hearts: 0, flames: 0, supporters: 0, points: 0 };
-    cur.hearts += r.hearts ?? 0;
-    cur.flames += r.flames ?? 0;
-    cur.supporters += r.supporters ?? 0;
-    cur.points = cur.hearts + cur.flames * 3;
-    map[r.videoId] = cur;
-  }
-  for (const id of Object.keys(map)) {
-    const v = map[id];
-    v.points = (v.hearts ?? 0) + (v.flames ?? 0) * 3;
-  }
-  return map;
-}
-
-/** 急上昇スコア：応援ポイントを時間減衰。ロングに微ブースト。 */
-function calcTrendScore(points: number, publishedAt: Date | null, isLong: boolean, now = new Date()) {
-  const ageHours = Math.max(
-    1,
-    (now.getTime() - (publishedAt ? new Date(publishedAt).getTime() : 0)) / 3600_000
-  );
-  const decay = Math.pow(ageHours / 24, 0.35); // 新しいほど有利
-  const longBoost = isLong ? 1.05 : 1.0;       // ロングに微ブースト（維持）
-  return (points / decay) * longBoost;
-}
-
-export async function GET(req: Request) {
-  try {
-    const { searchParams } = new URL(req.url);
-    const from = rangeToFrom(searchParams.get("range"));
-    const longOnlyWhere = buildLongOnlyWhere(searchParams);
-
-    const where: Prisma.VideoWhereInput = {
-      publishedAt: { gte: from },
-      ...(longOnlyWhere ?? {}),
-    };
-
-    const videos = await prisma.video.findMany({
-      where,
+  // もしスナップショットが0なら、空表示を避けるため期間内の新着を返す
+  if (snapshots.length === 0) {
+    const fallback = await prisma.video.findMany({
+      where: {
+        AND: [
+          { publishedAt: { gte: from } },
+          ...(videoAND.length ? videoAND : []),
+        ],
+      },
       select: {
         id: true,
         title: true,
@@ -97,53 +89,70 @@ export async function GET(req: Request) {
         channelTitle: true,
         publishedAt: true,
         durationSec: true,
-        views: true,
-        likes: true,
       },
       orderBy: { publishedAt: "desc" },
-      take: 500,
+      take: 50,
     });
-
-    const sums = await loadSupportSums(
-      videos.map((v) => v.id),
-      from
-    );
-
-    const now = new Date();
-    const ranked = videos
-      .map((v) => {
-        const s = sums[v.id] ?? { hearts: 0, flames: 0, supporters: 0, points: 0 };
-        const isLong = (v.durationSec ?? 0) >= 61;
-        const trendScore = calcTrendScore(s.points, v.publishedAt, isLong, now);
-        return {
-          id: v.id,
-          title: v.title,
-          url: v.url,
-          thumbnailUrl: v.thumbnailUrl,
-          channelTitle: v.channelTitle,
-          publishedAt: v.publishedAt,
-          durationSec: v.durationSec,
-          views: v.views ?? 0,
-          likes: v.likes ?? 0,
-          support: s,
-          trendScore,
-        };
-      })
-      // 応援 0 の動画も含めつつ、スコアで並べる
-      .sort((a, b) => b.trendScore - a.trendScore);
-
-    return NextResponse.json({
-      ok: true,
-      range: searchParams.get("range") ?? "24h",
-      shorts: searchParams.get("shorts") ?? "include",
-      total: ranked.length,
-      videos: ranked,
-    });
-  } catch (err: any) {
-    console.error("GET /api/trending failed", err);
-    return NextResponse.json(
-      { ok: false, error: err?.message ?? "unknown error" },
-      { status: 500 }
-    );
+    return NextResponse.json({ ok: true, list: fallback });
   }
+
+  // videoId ごとに加算
+  const sums: Record<string, { hearts: number; flames: number; supporters: number }> = {};
+  for (const row of snapshots as any[]) {
+    const id = String(row.videoId);
+    const c = countsFromSnap(row);
+    const cur = sums[id] || { hearts: 0, flames: 0, supporters: 0 };
+    cur.hearts += c.hearts;
+    cur.flames += c.flames;
+    cur.supporters += c.supporters;
+    sums[id] = cur;
+  }
+
+  const ids = Object.keys(sums);
+  if (ids.length === 0) return NextResponse.json({ ok: true, list: [] });
+
+  // 表示用の Video 情報を取得
+  const videos = await prisma.video.findMany({
+    where: {
+      id: { in: ids },
+      ...(videoAND.length ? { AND: videoAND } : {}),
+    },
+    select: {
+      id: true,
+      title: true,
+      url: true,
+      thumbnailUrl: true,
+      channelTitle: true,
+      publishedAt: true,
+      durationSec: true,
+    },
+  });
+
+  const now = new Date();
+  const rows = videos.map((v) => {
+    const sum = sums[v.id];
+    const support = supportScore(sum);
+    const hours = Math.max(
+      1,
+      (now.getTime() - (v.publishedAt ? new Date(v.publishedAt).getTime() : now.getTime())) /
+        3_600_000
+    );
+
+    // 急上昇：時間減衰＋ロング微ブースト
+    const trendScore =
+      support / Math.pow(hours / windowHours, 0.35) + (v.durationSec && v.durationSec >= 61 ? support * 0.05 : 0);
+
+    return {
+      ...v,
+      hearts: sum.hearts,
+      flames: sum.flames,
+      supporters: sum.supporters,
+      support,
+      trendScore,
+    };
+  });
+
+  rows.sort((a, b) => (sort === "support" ? b.support - a.support : b.trendScore - a.trendScore));
+
+  return NextResponse.json({ ok: true, list: rows.slice(0, 50) });
 }
