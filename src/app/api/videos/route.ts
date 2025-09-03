@@ -89,7 +89,9 @@ export async function GET(req: Request) {
         thumbnailUrl: true,
         publishedAt: true,
         durationSec: true,
-        viewCount: true,       // あればHot算出に使える。無いなら未使用でもOK
+        views: true,     
+        likes: true,
+        // あればHot算出に使える。無いなら未使用でもOK
         supportPoints: true,   // 既存の総ポイント（参考）
       },
       orderBy: { publishedAt: "desc" },
