@@ -1,3 +1,18 @@
+// prisma/schema.prisma
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  // ふだんは DATABASE_URL を使うのが一般的
+  url       = env("DATABASE_URL")
+  // Neon などでマイグレーション用に直結URLを分ける場合はコメントを外す
+  // shadowDatabaseUrl = env("SHADOW_DATABASE_URL")
+}
+
+
 model Video {
   id               String   @id @default(cuid())
   platform         String
@@ -46,3 +61,4 @@ model SupportSnapshot {
   @@id([videoId, hourStart])
   @@index([hourStart])
 }
+
