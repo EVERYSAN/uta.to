@@ -1,4 +1,3 @@
-// src/app/api/refresh/youtube/route.ts
 import { NextResponse } from "next/server";
 import prisma from "@/lib/prisma";
 
@@ -38,9 +37,7 @@ function pickThumb(it: YtSearchItem): string | undefined {
 
 function getVideoId(it: YtSearchItem): string | undefined {
   if (!it) return undefined;
-  // search.list の標準は id.videoId
   if (typeof it.id === "object" && it.id?.videoId) return it.id.videoId;
-  // 稀に id が string のケースも拾っておく
   if (typeof it.id === "string") return it.id;
   return undefined;
 }
@@ -56,12 +53,12 @@ export async function GET(req: Request) {
     }
 
     const url = new URL(req.url);
-    const hours = Math.max(1, Number(url.searchParams.get("hours") ?? 24)); // デフォルト24h
-    const limit = Math.min(50, Math.max(1, Number(url.searchParams.get("limit") ?? 30))); // max 50
+    const hours = Math.max(1, Number(url.searchParams.get("hours") ?? 24));
+    const limit = Math.min(50, Math.max(1, Number(url.searchParams.get("limit") ?? 30)));
     const q = (url.searchParams.get("q") ?? "").trim();
     const channelId = (url.searchParams.get("channelId") ?? "").trim();
 
-    const since = new Date(Date.now() - hours * 60 * 60 * 1000).toISOString();
+    const sinceIso = new Date(Date.now() - hours * 60 * 60 * 1000).toISOString();
 
     const params = new URLSearchParams({
       key,
@@ -69,9 +66,8 @@ export async function GET(req: Request) {
       maxResults: String(limit),
       type: "video",
       order: "date",
-      publishedAfter: since,
+      publishedAfter: sinceIso,
     });
-
     if (q) params.set("q", q);
     if (channelId) params.set("channelId", channelId);
 
@@ -81,7 +77,12 @@ export async function GET(req: Request) {
     if (!res.ok) {
       const text = await res.text().catch(() => "");
       return NextResponse.json(
-        { ok: false, route: "refresh/youtube", error: `YouTube search failed: ${res.status}`, details: text.slice(0, 500) },
+        {
+          ok: false,
+          route: "refresh/youtube",
+          error: `YouTube search failed: ${res.status}`,
+          details: text.slice(0, 500),
+        },
         { status: 500 }
       );
     }
@@ -102,58 +103,57 @@ export async function GET(req: Request) {
       }
 
       const title = it.snippet?.title ?? "(no title)";
-      const channelTitle = it.snippet?.channelTitle ?? undefined;
-      // string → Date に正規化（なければ undefined）
-      const publishedRaw = it.snippet?.publishedAt ?? undefined;
-      const publishedAt = publishedRaw ? new Date(publishedRaw) : undefined;
+      const channelTitle = it.snippet?.channelTitle || undefined;
+      const publishedRaw = it.snippet?.publishedAt || undefined;
+      const publishedAt: Date | undefined = publishedRaw ? new Date(publishedRaw) : undefined;
       const thumbnailUrl = pickThumb(it);
-      const url = `https://www.youtube.com/watch?v=${videoId}`;
+      const watchUrl = `https://www.youtube.com/watch?v=${videoId}`;
 
-      // 既存有無チェック（作成/更新のカウント用途）
       const exists = await prisma.video.findUnique({
         where: { platform_platformVideoId: { platform: "youtube", platformVideoId: videoId } },
         select: { id: true },
       });
 
+      // --- create オブジェクトは後から条件付きで代入 ---
+      const createData: any = {
+        platform: "youtube",
+        platformVideoId: videoId,
+        title,
+        url: watchUrl,
+      };
+      if (channelTitle) createData.channelTitle = channelTitle;
+      if (thumbnailUrl) createData.thumbnailUrl = thumbnailUrl;
+      if (publishedAt) createData.publishedAt = publishedAt; // Date を直接代入（Prisma は Date か ISO string を許容）
+
+      // --- update オブジェクトも同様に ---
+      const updateData: any = {
+        title,
+        url: watchUrl,
+      };
+      if (channelTitle) updateData.channelTitle = channelTitle;
+      if (thumbnailUrl) updateData.thumbnailUrl = thumbnailUrl;
+      if (publishedAt) updateData.publishedAt = publishedAt;
+
       await prisma.video.upsert({
         where: { platform_platformVideoId: { platform: "youtube", platformVideoId: videoId } },
-        create: {
-          platform: "youtube",
-          platformVideoId: videoId,
-          title,
-          url,
-          ...(channelTitle ? { channelTitle } : {}),
-          ...(thumbnailUrl ? { thumbnailUrl } : {}),
-          ...(publishedAt ? { publishedAt } : {}), // 値がある時だけ入れる
-        },
-        update: {
-          title,
-          url,
-          ...(channelTitle ? { channelTitle } : {}),
-          ...(thumbnailUrl ? { thumbnailUrl } : {}),
-          ...(publishedAt ? { publishedAt } : {}), // 同上
-        },
+        create: createData,
+        update: updateData,
       });
 
       processed++;
-      if (exists) updated++;
-      else created++;
+      exists ? updated++ : created++;
     }
 
     return NextResponse.json({
       ok: true,
       route: "refresh/youtube",
       query: { q, channelId, hours, limit },
-      since,
+      since: sinceIso,
       counts: { processed, created, updated, skipped },
     });
   } catch (e: any) {
     return NextResponse.json(
-      {
-        ok: false,
-        route: "refresh/youtube",
-        error: e?.message ?? String(e),
-      },
+      { ok: false, route: "refresh/youtube", error: e?.message ?? String(e) },
       { status: 500 }
     );
   }
