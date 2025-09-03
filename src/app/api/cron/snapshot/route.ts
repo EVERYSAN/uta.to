@@ -1,156 +1,38 @@
+// src/app/api/cron/snapshot/route.ts
 import { NextResponse } from "next/server";
-import { PrismaClient, Prisma } from "@prisma/client";
 
-export const runtime = "nodejs";
+export const runtime = "nodejs"; // EdgeでなければnodejsでOK
 
-type RefreshItem = {
-  platform?: string | null;
-  platformVideoId: string;
-  url?: string | null;
-  title?: string | null;
-  thumbnailUrl?: string | null;
-  durationSec?: number | null;
-  publishedAt?: string | Date | null;
-  channelTitle?: string | null;
-  views?: number | null;
-  likes?: number | null;
-};
+const BASE_URL =
+  process.env.NEXT_PUBLIC_SITE_URL
+  ?? (process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : "http://localhost:3000");
 
-const prisma = new PrismaClient();
+const BYPASS = process.env.VERCEL_BYPASS_TOKEN; // ← ダッシュボードで作ったトークンを環境変数に
 
-function toDate(input: string | Date | null | undefined): Date | null {
-  if (!input) return null;
-  const d = typeof input === "string" ? new Date(input) : input;
-  return isNaN(d.getTime()) ? null : d;
-}
-
-const info = (m: string, meta?: any) =>
-  console.log(`[INFO] ${new Date().toISOString()} ${m}`, meta ?? "");
-const error = (m: string, meta?: any) =>
-  console.error(`[ERROR] ${new Date().toISOString()} ${m}`, meta ?? "");
-
-export async function GET(req: Request) {
-  const url = new URL(req.url);
-  const hours = Number(url.searchParams.get("hours") ?? 24);
-  const limit = Number(url.searchParams.get("limit") ?? 300);
-  const q = url.searchParams.get("query") ?? "";
-
-  if (!process.env.YT_API_KEY) {
-    error("YT_API_KEY not set");
-    return NextResponse.json(
-      { ok: false, route: "cron/snapshot", error: "YT_API_KEY not set" },
-      { status: 500 }
-    );
-  }
-
-  const origin =
-    process.env.NEXT_PUBLIC_BASE_URL ||
-    (process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : "");
-  if (!origin) {
-    error("Base URL unresolved");
-    return NextResponse.json(
-      { ok: false, route: "cron/snapshot", error: "Base URL not resolved" },
-      { status: 500 }
-    );
-  }
-
+export async function GET() {
   try {
-    const refreshUrl = new URL("/api/refresh/youtube", origin);
-    refreshUrl.searchParams.set("hours", String(hours));
-    refreshUrl.searchParams.set("limit", String(limit));
-    if (q) refreshUrl.searchParams.set("q", q);
-
-    const r = await fetch(refreshUrl.toString(), { cache: "no-store" });
-    if (!r.ok) {
-      const body = await r.text().catch(() => "");
-      throw new Error(`refresh/youtube ${r.status} ${body}`);
+    const url = new URL("/api/refresh/youtube", BASE_URL);
+    if (BYPASS) {
+      // どちらか一方でもOK。念のため両方付与
+      url.searchParams.set("x-vercel-protection-bypass", BYPASS);
+      url.searchParams.set("x-vercel-set-bypass-cookie", "true");
     }
 
-    const json = await r.json();
-    const items: RefreshItem[] = Array.isArray(json?.items) ? json.items : [];
+    const res = await fetch(url.toString(), {
+      headers: BYPASS ? { "x-vercel-protection-bypass": BYPASS } : {},
+      cache: "no-store",
+      next: { revalidate: 0 },
+    });
 
-    let fetched = items.length;
-    let upserts = 0;
-    let skippedNoId = 0;
-
-    for (const it of items) {
-      const platform = (it.platform ?? "youtube").toLowerCase();
-      const platformVideoId = (it.platformVideoId ?? "").trim();
-      if (!platformVideoId) {
-        skippedNoId++;
-        continue;
-      }
-
-      // ---- フォールバックを確定（必須フィールドは常に非 undefined）----
-      const safeTitle = (it.title ?? "").trim() || `video ${platformVideoId}`;
-      const safeUrl =
-        (it.url ?? "").trim() ||
-        `https://www.youtube.com/watch?v=${platformVideoId}`;
-      const safeThumb =
-        (it.thumbnailUrl ?? "").trim() ||
-        `https://i.ytimg.com/vi/${platformVideoId}/hqdefault.jpg`;
-      // ここが重要：必須扱いの publishedAt は常に Date を入れる
-      const safePublishedAt: Date = toDate(it.publishedAt) ?? new Date();
-
-      // ---- update 用：値がある時だけ更新（既存を壊さない）----
-      const updateData: Prisma.VideoUpdateInput = {};
-      if (it.title) updateData.title = it.title;
-      if (it.url) updateData.url = it.url;
-      if (it.thumbnailUrl) updateData.thumbnailUrl = it.thumbnailUrl;
-      if (typeof it.durationSec === "number")
-        updateData.durationSec = it.durationSec;
-      if (it.channelTitle) updateData.channelTitle = it.channelTitle;
-      if (typeof it.views === "number") updateData.views = it.views;
-      if (typeof it.likes === "number") updateData.likes = it.likes;
-      // publishedAt は update 時も値がある時だけ
-      if (toDate(it.publishedAt)) updateData.publishedAt = safePublishedAt;
-
-      // ---- create 用：必須を先に確定してから任意項目を段階的に付与 ----
-      const createData: Prisma.VideoCreateInput = {
-        platform,
-        platformVideoId,
-        title: safeTitle,
-        url: safeUrl,
-        thumbnailUrl: safeThumb,
-        publishedAt: safePublishedAt,
-      };
-      if (typeof it.durationSec === "number")
-        (createData as any).durationSec = it.durationSec;
-      if (it.channelTitle) (createData as any).channelTitle = it.channelTitle;
-      if (typeof it.views === "number") (createData as any).views = it.views;
-      if (typeof it.likes === "number") (createData as any).likes = it.likes;
-
-      await prisma.video.upsert({
-        where: { platform_platformVideoId: { platform, platformVideoId } },
-        create: createData,
-        update: updateData,
-      });
-
-      upserts++;
+    const body = await res.text();
+    if (!res.ok) {
+      console.error("snapshot refresh/youtube failed", res.status, body.slice(0, 400));
+      return NextResponse.json({ ok: false, status: res.status }, { status: 502 });
     }
 
-    info("snapshot done", {
-      hours,
-      limit,
-      query: q,
-      fetched,
-      upserts,
-      skippedNoId,
-    });
-
-    return NextResponse.json({
-      ok: true,
-      route: "cron/snapshot",
-      params: { hours, limit, query: q },
-      fetched,
-      upserts,
-      skippedNoId,
-    });
+    return NextResponse.json({ ok: true });
   } catch (e: any) {
-    error("snapshot failed", { message: String(e?.message || e) });
-    return NextResponse.json(
-      { ok: false, route: "cron/snapshot", error: String(e?.message || e) },
-      { status: 500 }
-    );
+    console.error("[snapshot] error", e);
+    return NextResponse.json({ ok: false, error: String(e) }, { status: 500 });
   }
 }
