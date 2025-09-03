@@ -5,10 +5,9 @@ import Link from 'next/link';
 import ClientBits from './ClientBits';
 import YouTubeShortPlayer from '@/components/YouTubeShortPlayer';
 import HistoryMarker from '@/components/HistoryMarker';
-import SupportButton from "@/components/SupportButton";
+import SupportButton from '@/components/SupportButton';
 
-
-export const dynamic = 'force-dynamic'; // 常に最新を取得
+export const dynamic = 'force-dynamic';
 
 const prisma = new PrismaClient();
 
@@ -39,26 +38,22 @@ const secsToLabel = (s?: number | null) => {
 /** URL/ID/shorts から 11桁のYouTube IDを抽出 */
 function toYouTubeId(input?: string | null): string | null {
   if (!input) return null;
-  if (/^[a-zA-Z0-9_-]{11}$/.test(input)) return input; // 既にIDならそのまま
+  if (/^[a-zA-Z0-9_-]{11}$/.test(input)) return input;
 
   try {
     const u = new URL(input);
     const host = u.hostname.replace(/^www\./, '');
     const parts = u.pathname.split('/').filter(Boolean);
 
-    // youtu.be/VIDEOID
     if (host === 'youtu.be' && parts[0] && /^[\w-]{11}/.test(parts[0])) {
       return parts[0].substring(0, 11);
     }
-    // youtube.com/watch?v=VIDEOID
     const v = u.searchParams.get('v');
     if (v && /^[\w-]{11}/.test(v)) return v.substring(0, 11);
-    // /embed/VIDEOID
     const i = parts.indexOf('embed');
     if (i >= 0 && parts[i + 1] && /^[\w-]{11}/.test(parts[i + 1])) {
       return parts[i + 1].substring(0, 11);
     }
-    // /shorts/VIDEOID
     if (parts[0] === 'shorts' && parts[1] && /^[\w-]{11}/.test(parts[1])) {
       return parts[1].substring(0, 11);
     }
@@ -79,9 +74,6 @@ function TrendingBadge() {
   );
 }
 
-<ClientBits videoId={v.id} />
-<SupportButton videoId={v.id} initialPoints={(v as any).supportPoints ?? 0} />
-
 type Params = { params: { id: string } };
 
 export default async function VideoDetailPage({ params }: Params) {
@@ -100,6 +92,7 @@ export default async function VideoDetailPage({ params }: Params) {
     channelTitle: true,
     views: true,
     likes: true,
+    supportPoints: true, // ← 追加
   } as const;
 
   let v =
@@ -111,16 +104,14 @@ export default async function VideoDetailPage({ params }: Params) {
 
   if (!v) notFound();
 
-  // 正規化（platformVideoId が URL でもOK）
   const idOrUrl = v.platformVideoId || v.url || '';
   const ytId = toYouTubeId(idOrUrl);
 
-  // 縦型判定：duration<=60 または shorts URL
   const isShort =
     (typeof v.durationSec === 'number' ? v.durationSec <= 60 : false) ||
     /(^|\/)shorts(\/|$)/.test(idOrUrl);
 
-  // 関連（同チャンネル優先→足りなければ直近公開で補完）
+  // 関連（同チャンネル優先→直近補完）
   let related = await prisma.video.findMany({
     where: {
       id: { not: v.id },
@@ -173,7 +164,6 @@ export default async function VideoDetailPage({ params }: Params) {
                 autoPlay={false}
               />
             ) : (
-              // IDが取れない場合のフォールバック
               <div className="w-full aspect-video grid place-items-center bg-zinc-900 text-zinc-200">
                 <a
                   href={v.url ?? '#'}
@@ -186,7 +176,6 @@ export default async function VideoDetailPage({ params }: Params) {
               </div>
             )
           ) : (
-            // YouTube以外のフォールバック
             <iframe
               src={v.url ?? ''}
               title={v.title ?? 'video'}
@@ -208,6 +197,12 @@ export default async function VideoDetailPage({ params }: Params) {
           <span className="text-zinc-400">❤️ {fmt(v.likes)}</span>
 
           <span className="ml-auto" />
+          {/* 応援ボタン（初期ポイント表示） */}
+          <SupportButton
+            videoId={v.id}
+            initialPoints={v.supportPoints ?? 0}
+          />
+
           {/* YouTubeで開く導線（常設） */}
           {v.url && (
             <a
@@ -219,7 +214,8 @@ export default async function VideoDetailPage({ params }: Params) {
               YouTubeで開く ↗
             </a>
           )}
-          {/* お気に入り/共有など既存のクライアント要素 */}
+
+          {/* 既存のクライアント要素 */}
           <ClientBits videoId={v.id} />
         </div>
 
