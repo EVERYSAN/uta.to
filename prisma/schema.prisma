@@ -88,4 +88,17 @@ model SupportEvent {
   @@index([videoId, createdAt])
 }
 
+model SupportSnapshot {
+  id         String   @id @default(cuid())
+  videoId    String
+  hourStart  DateTime               // UTCの時間粒度（分秒ミリ秒=0）
+  amount     Int
+  createdAt  DateTime @default(now())
+
+  video      Video    @relation(fields: [videoId], references: [id], onDelete: Cascade)
+
+  @@unique([videoId, hourStart], name: "videoId_hourStart")
+  @@index([hourStart])
+}
+
 
