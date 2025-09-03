@@ -45,27 +45,6 @@ type Video = {
 };
 type ApiList = { ok: boolean; items: Video[]; page?: number; take?: number; total?: number };
 
-/* ===== last video (任意) ===== */
-function ContinueFromHistory() {
-  const [h, setH] = useState<{ videoId: string; title?: string; at: number } | null>(null);
-  useEffect(() => {
-    try {
-      const raw = localStorage.getItem("lastVideo");
-      if (raw) setH(JSON.parse(raw));
-    } catch {}
-  }, []);
-  if (!h) return null;
-  return (
-    <Link
-      href={`/v/${h.videoId}`}
-      prefetch={false}
-      className="inline-flex items-center gap-2 rounded-md bg-zinc-900 hover:bg-zinc-800 px-3 py-2 text-sm"
-    >
-      ▶ 続きから見る{h.title ? `：${h.title}` : ""}
-    </Link>
-  );
-}
-
 /* ===== badge ===== */
 function TrendingBadge({ rank, label }: { rank?: number | null; label: string }) {
   const txt = rank ? `#${rank}` : "急上昇";
@@ -127,7 +106,7 @@ function VideoCard({ v, rangeLabel }: { v: Video; rangeLabel: string }) {
 /* ===== filters ===== */
 type Range = "1d" | "7d" | "30d";
 type ShortsMode = "exclude" | "all";
-type SortMode = "trending" | "points"; // ← newest を除去
+type SortMode = "trending" | "points"; // 「新着順」は削除
 type Prefs = { range: Range; shorts: ShortsMode; sort: SortMode };
 const PREFS_KEY = "video:prefs";
 
@@ -154,7 +133,7 @@ function FilterBar({ prefs, onChange }: { prefs: Prefs; onChange: (next: Partial
       <Btn active={prefs.range === "7d"} onClick={() => onChange({ range: "7d" })}>7日</Btn>
       <Btn active={prefs.range === "30d"} onClick={() => onChange({ range: "30d" })}>30日</Btn>
 
-      {/* shorts */}
+      {/* shorts（文言を「ロング動画」に変更） */}
       <div className="ml-2 inline-flex rounded-full bg-zinc-800 p-1">
         <Btn active={prefs.shorts === "exclude"} onClick={() => onChange({ shorts: "exclude" })}>
           ロング動画
@@ -164,7 +143,7 @@ function FilterBar({ prefs, onChange }: { prefs: Prefs; onChange: (next: Partial
         </Btn>
       </div>
 
-      {/* sort */}
+      {/* sort（新着順トグルは削除） */}
       <div className="ml-2 inline-flex rounded-full bg-zinc-800 p-1">
         <Btn active={prefs.sort === "trending"} onClick={() => onChange({ sort: "trending" })}>急上昇</Btn>
         <Btn active={prefs.sort === "points"} onClick={() => onChange({ sort: "points" })}>応援順</Btn>
@@ -187,12 +166,12 @@ export default function TrendingPage() {
     }
   }, []);
 
-  const coerceSort = (s?: string | null): SortMode => (s === "trending" || s === "points" ? s : "trending");
+  const coerceSort = (s?: string | null): SortMode =>
+    s === "trending" || s === "points" ? (s as SortMode) : "trending";
 
   const init: Prefs = {
     range: ((search.get("range") as Range) ?? (saved.range as Range) ?? "1d"),
     shorts: ((search.get("shorts") as ShortsMode) ?? (saved.shorts as ShortsMode) ?? "exclude"),
-    // newest が残っていても trending に丸める
     sort: coerceSort((search.get("sort") as string) ?? (saved.sort as string) ?? "trending"),
   };
 
@@ -270,19 +249,7 @@ export default function TrendingPage() {
 
   return (
     <main className="mx-auto max-w-7xl px-4 py-6 space-y-4">
-      <div className="flex items-center justify-between gap-3">
-        <h1 className="text-2xl md:text-3xl font-bold">急上昇（ロング優先）</h1>
-        <div className="flex items-center gap-2">
-          <Link
-            href="/saved"
-            prefetch={false}
-            className="inline-flex items-center gap-2 rounded-md bg-zinc-900 hover:bg-zinc-800 px-3 py-2 text-sm"
-          >
-            💾 保存ページ
-          </Link>
-          <ContinueFromHistory />
-        </div>
-      </div>
+      <h1 className="text-2xl md:text-3xl font-bold">急上昇（ロング優先）</h1>
 
       <FilterBar prefs={prefs} onChange={sync} />
 
