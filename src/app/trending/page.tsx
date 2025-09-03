@@ -1,5 +1,8 @@
 // src/app/trending/page.tsx
 import Link from "next/link";
+import { headers } from "next/headers";
+
+export const revalidate = 0;
 
 type Item = {
   id: string;
@@ -30,13 +33,12 @@ const RANGES: Array<"1d" | "7d" | "30d"> = ["1d", "7d", "30d"];
 function qs(params: Record<string, string | number | undefined>) {
   const sp = new URLSearchParams();
   for (const [k, v] of Object.entries(params)) {
-    if (v === undefined || v === null) continue;
+    if (v == null) continue;
     sp.set(k, String(v));
   }
   return sp.toString();
 }
-
-function secondsToLabel(sec: number | null | undefined) {
+function labelSec(sec: number | null | undefined) {
   if (sec == null) return "—";
   const m = Math.floor(sec / 60);
   const s = sec % 60;
@@ -52,30 +54,29 @@ export default async function TrendingPage({
   const page = Math.max(1, Number(searchParams.page ?? "1"));
   const shorts = searchParams.shorts ?? "exclude";
 
-  const res = await fetch(
-    `/api/videos?${qs({
-      range,
-      page,
-      take: 24,
-      sort: "trending",
-      shorts,
-    })}`,
-    { cache: "no-store" }
-  );
+  // 絶対URLを構築（本番/ローカル両対応）
+  const h = headers();
+  const proto = h.get("x-forwarded-proto") ?? "https";
+  const host = h.get("x-forwarded-host") ?? h.get("host");
+  const origin = `${proto}://${host}`;
 
-  if (!res.ok) {
-    throw new Error(`Failed to load videos (${res.status})`);
+  let data: ApiResponse = { ok: true, items: [], page, take: 24, total: 0 };
+  try {
+    const res = await fetch(
+      `${origin}/api/videos?${qs({ range, page, take: 24, sort: "trending", shorts })}`,
+      { cache: "no-store" }
+    );
+    if (res.ok) data = (await res.json()) as ApiResponse;
+  } catch (e) {
+    console.error("fetch /api/videos failed", e);
   }
 
-  const data = (await res.json()) as ApiResponse;
   const { items, total, take } = data;
-
   const hasPrev = page > 1;
   const hasNext = page * take < total;
 
   return (
     <main className="max-w-6xl mx-auto px-4 py-6 space-y-6">
-      {/* Range tabs */}
       <div className="flex gap-2">
         {RANGES.map((r) => {
           const active = r === range;
@@ -89,8 +90,6 @@ export default async function TrendingPage({
             </Link>
           );
         })}
-
-        {/* Shorts toggle */}
         <div className="ml-auto flex gap-2">
           <Link
             href={`/trending?${qs({ range, page: 1, shorts: "exclude" })}`}
@@ -107,54 +106,45 @@ export default async function TrendingPage({
         </div>
       </div>
 
-      {/* grid */}
-      <ul className="grid gap-4 grid-cols-1 sm:grid-cols-2 lg:grid-cols-3">
-        {items.map((it, idx) => {
-          const rank = it.trendingRank ?? (page - 1) * take + (idx + 1);
-          const isLong = it.durationSec == null ? true : it.durationSec >= 61; // 61秒からロング
-          return (
-            <li key={it.id} className="rounded-xl border p-3 flex gap-3">
-              <div className="text-2xl font-bold w-12 text-right">{rank}</div>
-              <div className="flex-1">
-                <div className="flex gap-3">
-                  {it.thumbnailUrl ? (
-                    <img
-                      src={it.thumbnailUrl}
-                      alt={it.title}
-                      className="w-32 h-20 object-cover rounded-md"
-                    />
-                  ) : (
-                    <div className="w-32 h-20 bg-gray-100 rounded-md" />
+      {items.length === 0 ? (
+        <p className="text-center text-sm text-gray-500 py-20">該当する動画がありません</p>
+      ) : (
+        <ul className="grid gap-4 grid-cols-1 sm:grid-cols-2 lg:grid-cols-3">
+          {items.map((it, idx) => {
+            const rank = it.trendingRank ?? (page - 1) * take + (idx + 1);
+            const isLong = it.durationSec == null ? true : it.durationSec >= 61; // 61秒からロング
+            return (
+              <li key={it.id} className="rounded-xl border p-3 flex gap-3">
+                <div className="text-2xl font-bold w-12 text-right">{rank}</div>
+                <div className="flex-1">
+                  <div className="flex gap-3">
+                    {it.thumbnailUrl ? (
+                      <img src={it.thumbnailUrl} alt={it.title} className="w-32 h-20 object-cover rounded-md" />
+                    ) : (
+                      <div className="w-32 h-20 bg-gray-100 rounded-md" />
+                    )}
+                    <div className="flex-1">
+                      <div className="font-semibold line-clamp-2">{it.title}</div>
+                      <div className="text-sm text-gray-500">
+                        {it.channelTitle ?? "—"} ・ {labelSec(it.durationSec)} ・ {isLong ? "LONG" : "SHORT"}
+                      </div>
+                      <div className="text-xs text-gray-500">応援: {it.supportInRange ?? 0}</div>
+                    </div>
+                  </div>
+                  {it.url && (
+                    <div className="mt-2">
+                      <a href={it.url} target="_blank" className="text-sm underline text-blue-600">
+                        視聴する
+                      </a>
+                    </div>
                   )}
-                  <div className="flex-1">
-                    <div className="font-semibold line-clamp-2">{it.title}</div>
-                    <div className="text-sm text-gray-500">
-                      {it.channelTitle ?? "—"} ・ {secondsToLabel(it.durationSec)} ・{" "}
-                      {isLong ? "LONG" : "SHORT"}
-                    </div>
-                    <div className="text-xs text-gray-500">
-                      応援: {it.supportInRange ?? 0}
-                    </div>
-                  </div>
                 </div>
-                {it.url && (
-                  <div className="mt-2">
-                    <a
-                      href={it.url}
-                      target="_blank"
-                      className="text-sm underline text-blue-600"
-                    >
-                      視聴する
-                    </a>
-                  </div>
-                )}
-              </div>
-            </li>
-          );
-        })}
-      </ul>
+              </li>
+            );
+          })}
+        </ul>
+      )}
 
-      {/* pager */}
       <div className="flex items-center justify-between">
         <Link
           href={`/trending?${qs({ range, page: page - 1, shorts })}`}
