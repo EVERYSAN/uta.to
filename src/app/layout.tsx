@@ -2,14 +2,16 @@
 import './globals.css';
 import type { Metadata } from 'next';
 import Link from 'next/link';
+import HeaderActions from "@/components/HeaderActions";
+import ActionDock from "@/components/ActionDock";
 
 export const metadata: Metadata = {
   metadataBase: new URL('https://uta-to.vercel.app'),
   title: { default: 'uta.to', template: '%s | uta.to' },
-  description: '歌ってみたを横断検索 / 新着・人気・高評価でソート可能',
+  description: '歌ってみたのランキングサイト / 新着・人気・高評価でソート可能',
   openGraph: {
     title: 'uta.to',
-    description: '歌ってみたを横断検索',
+    description: '歌ってみたのランキングサイト',
     url: 'https://uta-to.vercel.app',
     siteName: 'uta.to',
     images: ['/og.png'],
@@ -49,3 +51,4 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
     </html>
   );
 }
+
