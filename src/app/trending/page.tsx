@@ -1,4 +1,3 @@
-// src/app/trending/page.tsx
 "use client";
 
 import Link from "next/link";
