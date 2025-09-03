@@ -40,7 +40,7 @@ type Video = {
   channelTitle: string | null;
   views: number | null;
   likes: number | null;
-  supportInRange?: number | null; // 期間内応援ポイント
+  supportInRange?: number | null;
   trendingRank?: number | null;
 };
 type ApiList = { ok: boolean; items: Video[]; page?: number; take?: number; total?: number };
@@ -67,7 +67,6 @@ function VideoCard({ v, rangeLabel }: { v: Video; rangeLabel: string }) {
     >
       <div className="relative aspect-video bg-zinc-800">
         {v.thumbnailUrl && (
-          // eslint-disable-next-line @next/next/no-img-element
           <img
             src={v.thumbnailUrl}
             alt={v.title ?? ""}
@@ -93,9 +92,7 @@ function VideoCard({ v, rangeLabel }: { v: Video; rangeLabel: string }) {
         <div className="flex items-center gap-3 text-[12px] text-zinc-400">
           <span>👁 {fmtCount(v.views)}</span>
           <span>❤️ {fmtCount(v.likes)}</span>
-          <span>
-            🔥 {rangeLabel === "24時間" ? "今日の応援" : `${rangeLabel}の応援`} {fmtCount(v.supportInRange ?? 0)}
-          </span>
+          <span>🔥 {fmtCount(v.supportInRange ?? 0)}</span>
           {v.channelTitle && (
             <span className="ml-auto truncate max-w-[50%] text-zinc-300">🎤 {v.channelTitle}</span>
           )}
@@ -108,7 +105,7 @@ function VideoCard({ v, rangeLabel }: { v: Video; rangeLabel: string }) {
 /* ===== filters ===== */
 type Range = "1d" | "7d" | "30d";
 type ShortsMode = "exclude" | "all";
-type SortMode = "trending" | "points"; // 「新着順」は削除
+type SortMode = "trending" | "points";
 type Prefs = { range: Range; shorts: ShortsMode; sort: SortMode };
 const PREFS_KEY = "video:prefs";
 
@@ -130,22 +127,15 @@ function FilterBar({ prefs, onChange }: { prefs: Prefs; onChange: (next: Partial
 
   return (
     <div className="flex flex-wrap items-center gap-2">
-      {/* range */}
       <Btn active={prefs.range === "1d"} onClick={() => onChange({ range: "1d" })}>24h</Btn>
       <Btn active={prefs.range === "7d"} onClick={() => onChange({ range: "7d" })}>7日</Btn>
       <Btn active={prefs.range === "30d"} onClick={() => onChange({ range: "30d" })}>30日</Btn>
 
-      {/* shorts（文言を「ロング動画」に変更） */}
       <div className="ml-2 inline-flex rounded-full bg-zinc-800 p-1">
-        <Btn active={prefs.shorts === "exclude"} onClick={() => onChange({ shorts: "exclude" })}>
-          ロング動画
-        </Btn>
-        <Btn active={prefs.shorts === "all"} onClick={() => onChange({ shorts: "all" })}>
-          すべて
-        </Btn>
+        <Btn active={prefs.shorts === "exclude"} onClick={() => onChange({ shorts: "exclude" })}>ロング動画</Btn>
+        <Btn active={prefs.shorts === "all"} onClick={() => onChange({ shorts: "all" })}>すべて</Btn>
       </div>
 
-      {/* sort（新着順トグルは削除） */}
       <div className="ml-2 inline-flex rounded-full bg-zinc-800 p-1">
         <Btn active={prefs.sort === "trending"} onClick={() => onChange({ sort: "trending" })}>急上昇</Btn>
         <Btn active={prefs.sort === "points"} onClick={() => onChange({ sort: "points" })}>応援順</Btn>
@@ -220,7 +210,6 @@ export default function TrendingPage() {
     }
   }
 
-  // 条件変化でリセット
   useEffect(() => {
     setItems([]);
     setPage(1);
@@ -229,7 +218,6 @@ export default function TrendingPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [prefs.range, prefs.shorts, prefs.sort]);
 
-  // 無限スクロール
   useEffect(() => {
     if (!sentinelRef.current) return;
     const el = sentinelRef.current;
@@ -251,19 +239,15 @@ export default function TrendingPage() {
 
   return (
     <main className="mx-auto max-w-7xl px-0 md:px-4 py-4 md:py-6 space-y-4">
-      {/* ▼ 見出しはヘッダーのロゴに任せるのでスペーサだけ */}
       <div className="h-10 md:h-12" />
-
       <div className="px-4">
         <FilterBar prefs={prefs} onChange={sync} />
       </div>
-
       <section className="px-4 grid gap-4 grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4">
         {items.map((v) => (
           <VideoCard key={v.id} v={v} rangeLabel={rangeLabel} />
         ))}
       </section>
-
       <div ref={sentinelRef} />
       {loading && <div className="text-center text-sm text-zinc-400 py-4">読み込み中…</div>}
       {!loading && !hasMore && items.length > 0 && (
