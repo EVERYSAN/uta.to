@@ -2,6 +2,25 @@
 import "./globals.css";
 import type { Metadata } from "next";
 import Link from "next/link";
+// 追加の import
+import HeaderActions from "@/components/HeaderActions";
+import ActionDock from "@/components/ActionDock";
+
+// 例）ヘッダー右側に
+<header className="sticky top-0 z-40 bg-zinc-950/80 backdrop-blur border-b border-zinc-900">
+  <div className="mx-auto max-w-7xl px-4 h-12 flex items-center justify-between gap-3">
+    {/* 左側は既存のロゴやナビ */}
+    <div className="flex items-center gap-3">
+      {/* ...既存... */}
+    </div>
+    {/* ★ここに追加 */}
+    <HeaderActions />
+  </div>
+</header>
+
+// body の一番最後（children の直後あたり）に
+<ActionDock />
+
 
 export const metadata: Metadata = {
   metadataBase: new URL("https://uta-to.vercel.app"),
@@ -78,3 +97,4 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
     </html>
   );
 }
+
