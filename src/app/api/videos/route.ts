@@ -1,4 +1,3 @@
-// src/app/api/videos/route.ts
 import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { Prisma } from "@prisma/client";
@@ -24,33 +23,20 @@ const isShortByMeta = (v: { url: string | null; durationSec: number | null }) =>
 const isLongByMeta = (v: { url: string | null; durationSec: number | null }) =>
   !isShortByMeta(v) && (v.durationSec == null || v.durationSec >= 61);
 
-/** 動的に SupportSnapshot の合計式を作る */
+/** SupportSnapshot の合計式を実行時に組み立てる（スキーマの差異に強くする） */
 function buildSupportSumExpr(): { expr: string; hasAny: boolean } {
   const ss = (Prisma as any).dmmf?.datamodel?.models?.find(
     (m: any) => m.name === "SupportSnapshot"
   );
   const names: string[] = ss?.fields?.map((f: any) => f.name) ?? [];
-
-  // まず候補名を優先順で探す
   const pick = (cands: string[]) => cands.find((n) => names.includes(n));
-
   const cols: string[] = [];
   const addIf = (n?: string) => n && cols.push(`COALESCE("${n}",0)`);
-
-  // よく使う名前群（どれが存在していてもOK）
   addIf(pick(["hearts", "heart", "heartCount", "heart_points", "supportHearts"]));
   addIf(pick(["flames", "flame", "flameCount", "flame_points", "supportFlames"]));
   addIf(pick(["supporters", "supporterCount", "support_count"]));
-
-  // もし個別カラムが無ければ、総合ポイントっぽい名前を探す
-  if (cols.length === 0) {
-    addIf(pick(["points", "score", "supportPoints", "total", "value"]));
-  }
-
-  if (cols.length === 0) {
-    // 何も分からない場合は 0 固定（SQL が壊れないように）
-    return { expr: "0", hasAny: false };
-  }
+  if (cols.length === 0) addIf(pick(["points", "score", "supportPoints", "total", "value"]));
+  if (cols.length === 0) return { expr: "0", hasAny: false };
   return { expr: cols.join(" + "), hasAny: true };
 }
 
@@ -65,12 +51,10 @@ export async function GET(req: Request) {
   const from = fromByRange(range);
   const offset = (page - 1) * take;
 
-  /** 期間内の応援ポイントを videoId ごとに合計（存在するカラム名で自動） */
+  // 期間内応援ポイントを集計（スキーマ差異に強い）
   const { expr: sumExpr, hasAny } = buildSupportSumExpr();
-
   let pointsRows: { videoId: string; points: number }[] = [];
   if (hasAny) {
-    // 動的 SQL（安全のためカラム名は DMMF から拾った既知名のみ）
     const sql = `
       SELECT "videoId", SUM(${sumExpr}) AS points
       FROM "SupportSnapshot"
@@ -81,46 +65,42 @@ export async function GET(req: Request) {
     pointsRows = await prisma.$queryRawUnsafe(sql, from);
   }
 
-  // videoId -> 期間内応援ポイント
   const pointsMap = new Map<string, number>();
   for (const r of pointsRows) pointsMap.set(String(r.videoId), Number(r.points) || 0);
 
-  // まずは「応援がある動画」を優先候補に（十分に多い場合はこの中からページング）
   let candidateIds = pointsRows.map((r) => String(r.videoId));
 
-  // 24h などで応援が少ない/ゼロなら、期間内の新着からフォールバックで補完
+  // 応援が少ない期間（特に24h）の穴埋め：期間内新着をフォールバック追加
   if (candidateIds.length < offset + take) {
-    const need = offset + take - candidateIds.length + 50; // ちょい多め
+    const need = offset + take - candidateIds.length + 50; // 少し多めに
+    const longOnlyFilter =
+      shorts === "exclude"
+        ? {
+            OR: [
+              { durationSec: { gte: 61 } },               // 61秒以上（ロング）
+              { durationSec: null },                      // 長さ不明は一旦含める
+              { url: { not: { contains: "/shorts/" } } }, // URLがshortsではない
+            ],
+          }
+        : undefined;
+
     const extra = await prisma.video.findMany({
       where: {
         publishedAt: { gte: from },
-        ...(shorts === "exclude"
-          ? {
-              OR: [
-                { durationSec: { gte: 61 } },
-                { durationSec: null },
-                { url: { not: { contains: "/shorts/" } } },
-                { url: { equals: null } },
-              ],
-            }
-          : {}),
+        ...(longOnlyFilter ? longOnlyFilter : {}),
       },
       orderBy: [{ publishedAt: "desc" as const }, { likes: "desc" as const }],
       select: { id: true },
       take: need,
     });
-    for (const v of extra) {
-      if (!candidateIds.includes(v.id)) candidateIds.push(v.id);
-    }
+    for (const v of extra) if (!candidateIds.includes(v.id)) candidateIds.push(v.id);
   }
 
-  // ページング対象の ID を決定
   const pageIds = candidateIds.slice(offset, offset + take);
   if (pageIds.length === 0) {
     return NextResponse.json({ ok: true, items: [], page, take, total: 0 });
   }
 
-  // 実データを取得
   const videos = await prisma.video.findMany({
     where: { id: { in: pageIds } },
     select: {
@@ -136,31 +116,22 @@ export async function GET(req: Request) {
     },
   });
 
-  // 並び順（points / trending）を最終決定
   const nowTs = Date.now();
-  const longBoost = (v: any) => (isLongByMeta(v) ? 1.05 : 1); // ロングは微ブースト
+  const longBoost = (v: any) => (isLongByMeta(v) ? 1.05 : 1);
   const list = videos.map((v) => {
     const support = pointsMap.get(v.id) ?? 0;
     const hours =
-      typeof v.publishedAt === "string" || v.publishedAt instanceof Date
+      v.publishedAt
         ? Math.max(1, (nowTs - new Date(v.publishedAt as any).getTime()) / 3_600_000)
         : 24;
-
-    // 急上昇スコア：期間内応援 ÷ 時間減衰（新しいほど強い）
-    const trendingScore = support / Math.pow(hours / 24, 0.35) * longBoost(v);
-
-    return {
-      ...v,
-      supportInRange: support,
-      _score: sort === "points" ? support : trendingScore,
-    };
+    const trendingScore = (support / Math.pow(hours / 24, 0.35)) * longBoost(v);
+    return { ...v, supportInRange: support, _score: sort === "points" ? support : trendingScore };
   });
 
-  // 指定の ID 順が崩れないように一度 indexMap を作って tie-breaker に使う
+  // 元の順をタイブレークに使って安定ソート
   const idxMap = new Map(pageIds.map((id, i) => [id, i]));
   list.sort((a, b) => {
     if (b._score !== a._score) return b._score - a._score;
-    // スコア同点時は points > views > likes > 元の順
     const pa = pointsMap.get(a.id) ?? 0;
     const pb = pointsMap.get(b.id) ?? 0;
     if (pb !== pa) return pb - pa;
@@ -169,7 +140,6 @@ export async function GET(req: Request) {
     return (idxMap.get(a.id) ?? 0) - (idxMap.get(b.id) ?? 0);
   });
 
-  // ランク番号（ページングに合わせる）
   const items = list.map((v, i) => ({
     id: v.id,
     title: v.title,
