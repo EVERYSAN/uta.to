@@ -1,111 +1,161 @@
+// src/app/api/videos/route.ts
 import { NextResponse } from "next/server";
-import prisma from "@/lib/prisma";
+import { PrismaClient } from "@prisma/client";
 
-function parseFrom(range: string | null): Date {
-  const now = Date.now();
-  switch ((range ?? "").toLowerCase()) {
-    case "24h":
-    case "1d":
-      return new Date(now - 24 * 60 * 60 * 1000);
-    case "30d":
-      return new Date(now - 30 * 24 * 60 * 60 * 1000);
-    case "7d":
-    default:
-      return new Date(now - 7 * 24 * 60 * 60 * 1000);
-  }
-}
+const prisma = new PrismaClient();
 
-function longShortWhere(shorts: string | null) {
-  const mode = (shorts ?? "all").toLowerCase();
-  if (mode === "exclude") {
-    return {
-      OR: [
-        { durationSec: { gte: 61 } },
-        {
-          AND: [
-            { durationSec: null },
-            { NOT: { url: { contains: "/shorts/" } } },
-          ],
-        },
-      ],
-    };
-  }
-  if (mode === "only") {
-    return {
-      OR: [
-        { durationSec: { lte: 60 } },
-        { url: { contains: "/shorts/" } },
-      ],
-    };
-  }
-  return {};
-}
+// 応援ポイントの重み（必要なら調整OK）
+const WEIGHT = {
+  hearts: 1,
+  flames: 3,
+  supporters: 10,
+} as const;
 
-type SupportSums = Record<
-  string,
-  { hearts: number; flames: number; supporters: number; points: number }
->;
+type Range = "1d" | "7d" | "30d";
+type ShortsMode = "exclude" | "all";
+type SortMode = "trending" | "points";
 
 export async function GET(req: Request) {
   try {
     const { searchParams } = new URL(req.url);
-    const from = parseFrom(searchParams.get("range"));
-    const shorts = searchParams.get("shorts"); // exclude | only | all
-    const sort = (searchParams.get("sort") ?? "points").toLowerCase(); // points | newest
-    const take = Math.min(Number(searchParams.get("take") ?? 30), 60);
 
-    // 1) まず期間内の動画候補を取得（ショート/ロングのフィルタもここでかける）
-    const videos = await prisma.video.findMany({
-      where: { publishedAt: { gte: from }, ...longShortWhere(shorts) },
-      orderBy: sort === "newest" ? { publishedAt: "desc" } : { publishedAt: "desc" },
-      take,
+    // ---- クエリ取得（既定値あり） ----
+    const page = Math.max(1, Number(searchParams.get("page") ?? "1") | 0);
+    const take = Math.min(48, Math.max(1, Number(searchParams.get("take") ?? "24") | 0));
+
+    const rangeParam = (searchParams.get("range") as Range) ?? "1d";
+    const range: Range = ["1d", "7d", "30d"].includes(rangeParam) ? rangeParam : "1d";
+
+    const shortsParam = (searchParams.get("shorts") as ShortsMode) ?? "exclude";
+    const shorts: ShortsMode = ["exclude", "all"].includes(shortsParam) ? shortsParam : "exclude";
+
+    const sortParam = (searchParams.get("sort") as SortMode) ?? "trending";
+    const sort: SortMode = ["trending", "points"].includes(sortParam) ? sortParam : "trending";
+
+    const now = new Date();
+    const days = range === "1d" ? 1 : range === "7d" ? 7 : 30;
+    const from = new Date(now.getTime() - days * 24 * 60 * 60 * 1000);
+
+    // ---- ロング動画（61秒〜）/ shorts 除外のフィルタ ----
+    const longFilter =
+      shorts === "exclude"
+        ? {
+            OR: [
+              { durationSec: { gte: 61 } }, // 61秒からロング
+              { durationSec: { equals: null } }, // 取得できていないものは許容
+            ],
+          }
+        : {};
+
+    const notShortsPath =
+      shorts === "exclude"
+        ? {
+            OR: [
+              { url: { not: { contains: "/shorts/" } } },
+              { url: { equals: null } }, // URL未設定は許容
+            ],
+          }
+        : {};
+
+    // ---- 期間内の応援集計（SupportSnapshot） ----
+    // ※ schema 側は SupportSnapshot に hearts / flames / supporters と createdAt がある前提
+    const grouped = await prisma.supportSnapshot.groupBy({
+      by: ["videoId"],
+      where: { createdAt: { gte: from } },
+      _sum: { hearts: true, flames: true, supporters: true },
+    });
+
+    // videoId -> 期間内の応援ポイント
+    const supportMap = new Map<string, number>();
+    for (const g of grouped) {
+      const h = g._sum.hearts ?? 0;
+      const f = g._sum.flames ?? 0;
+      const s = g._sum.supporters ?? 0;
+      const points = h * WEIGHT.hearts + f * WEIGHT.flames + s * WEIGHT.supporters;
+      supportMap.set(g.videoId, points);
+    }
+    const supportedIds = grouped.map((g) => g.videoId);
+
+    // ---- 候補動画の母集団（発行日が期間内 or 応援が期間内） ----
+    const candidates = await prisma.video.findMany({
+      where: {
+        AND: [
+          longFilter,
+          notShortsPath,
+          {
+            OR: [
+              { publishedAt: { gte: from } },
+              { id: { in: supportedIds.length ? supportedIds : ["__nohit__"] } }, // 空配列対策
+            ],
+          },
+        ],
+      },
+      // Video に存在する列のみ選択（存在しない列は選ばない！）
       select: {
         id: true,
-        platform: true,
-        platformVideoId: true,
         title: true,
         url: true,
         thumbnailUrl: true,
-        channelTitle: true,
-        publishedAt: true,
         durationSec: true,
+        publishedAt: true,
+        channelTitle: true,
+        views: true,
+        likes: true,
       },
     });
 
-    if (videos.length === 0) return NextResponse.json([]);
+    // ---- スコア計算（サーバー側で算出して安定化） ----
+    const withScore = candidates.map((v) => {
+      const support = supportMap.get(v.id) ?? 0;
 
-    // 2) 期間内の応援スナップショットを videoId ごとに集計してマージ
-    const ids = videos.map(v => v.id);
-    const grouped = (await (prisma as any).supportSnapshot.groupBy({
-      by: ["videoId"],
-      where: { createdAt: { gte: from }, videoId: { in: ids } },
-      _sum: { hearts: true, flames: true, supporters: true },
-    })) as Array<{
-      videoId: string;
-      _sum: { hearts: number | null; flames: number | null; supporters: number | null };
-    }>;
+      // 発行日時が無ければ古い扱い（時間減衰を強めに）
+      const published = v.publishedAt ? new Date(v.publishedAt).getTime() : now.getTime() - 90 * 24 * 3600 * 1000;
+      const hours = Math.max(1, (now.getTime() - published) / 3600000);
 
-    const sums: SupportSums = {};
-    for (const row of grouped) {
-      const h = row._sum.hearts ?? 0;
-      const f = row._sum.flames ?? 0;
-      const s = row._sum.supporters ?? 0;
-      const pts = h + f * 3 + s * 5;
-      sums[row.videoId] = { hearts: h, flames: f, supporters: s, points: pts };
-    }
+      // 急上昇: 応援 / (経過(24h)の0.35乗) にロング微ブースト
+      let trend = support / Math.pow(hours / 24, 0.35);
+      if ((v.durationSec ?? 999999) >= 61) trend *= 1.05;
 
-    const withSupport = videos.map(v => ({
-      ...v,
-      support: sums[v.id] ?? { hearts: 0, flames: 0, supporters: 0, points: 0 },
+      return {
+        ...v,
+        // フロント向けの追加プロパティ
+        supportInRange: support,
+        _trendScore: trend,
+      };
+    });
+
+    // ---- ソート & ランク付け ----
+    withScore.sort((a, b) => {
+      if (sort === "points") {
+        if (b.supportInRange !== a.supportInRange) return (b.supportInRange ?? 0) - (a.supportInRange ?? 0);
+        // 同点なら新しい方
+        return (new Date(b.publishedAt ?? 0).getTime() || 0) - (new Date(a.publishedAt ?? 0).getTime() || 0);
+      } else {
+        if (b._trendScore !== a._trendScore) return (b._trendScore ?? 0) - (a._trendScore ?? 0);
+        return (new Date(b.publishedAt ?? 0).getTime() || 0) - (new Date(a.publishedAt ?? 0).getTime() || 0);
+      }
+    });
+
+    const total = withScore.length;
+    const start = (page - 1) * take;
+    const end = start + take;
+    const sliced = withScore.slice(start, end).map((v, idx) => ({
+      id: v.id,
+      title: v.title,
+      url: v.url,
+      thumbnailUrl: v.thumbnailUrl,
+      durationSec: v.durationSec,
+      publishedAt: v.publishedAt ? new Date(v.publishedAt).toISOString() : null,
+      channelTitle: v.channelTitle,
+      views: v.views,
+      likes: v.likes,
+      supportInRange: v.supportInRange,
+      trendingRank: start + idx + 1, // 1始まりでランキング
     }));
 
-    if (sort === "points") {
-      withSupport.sort((a, b) => (b.support.points ?? 0) - (a.support.points ?? 0));
-    }
-
-    return NextResponse.json(withSupport);
-  } catch (e) {
-    console.error(e);
-    return NextResponse.json({ error: "failed" }, { status: 500 });
+    return NextResponse.json({ ok: true, page, take, total, items: sliced }, { headers: { "cache-control": "no-store" } });
+  } catch (err) {
+    console.error("GET /api/videos error", err);
+    return NextResponse.json({ ok: false, error: "failed" }, { status: 500 });
   }
 }
