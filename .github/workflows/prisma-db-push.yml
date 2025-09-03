@@ -1,28 +1,17 @@
 name: One-time Prisma DB Push
 
 on:
-  workflow_dispatch: {}   # 手動実行のみ
+  workflow_dispatch: {}   # 手動実行
 
 jobs:
   db-push:
     runs-on: ubuntu-latest
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Use Node.js 20
-        uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-
-      - name: Install deps
-        run: npm ci
-
-      - name: Generate Prisma Client
-        run: npx prisma generate
-
-      - name: Prisma DB Push (apply schema to PRODUCTION)
+      # 依存インストールなし。npx で Prisma CLI を都度取得して実行
+      - name: Prisma DB Push (no install)
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
-        run: npx prisma db push --accept-data-loss
+        run: npx -y prisma@5.22.0 db push --skip-generate --accept-data-loss
