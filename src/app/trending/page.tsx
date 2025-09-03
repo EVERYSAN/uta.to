@@ -1,3 +1,4 @@
+// FILE: src/app/trending/page.tsx
 "use client";
 
 import Link from "next/link";
@@ -126,7 +127,7 @@ function VideoCard({ v, rangeLabel }: { v: Video; rangeLabel: string }) {
 /* ===== filters ===== */
 type Range = "1d" | "7d" | "30d";
 type ShortsMode = "exclude" | "all";
-type SortMode = "trending" | "points" | "newest";
+type SortMode = "trending" | "points"; // ← newest を除去
 type Prefs = { range: Range; shorts: ShortsMode; sort: SortMode };
 const PREFS_KEY = "video:prefs";
 
@@ -156,7 +157,7 @@ function FilterBar({ prefs, onChange }: { prefs: Prefs; onChange: (next: Partial
       {/* shorts */}
       <div className="ml-2 inline-flex rounded-full bg-zinc-800 p-1">
         <Btn active={prefs.shorts === "exclude"} onClick={() => onChange({ shorts: "exclude" })}>
-          ショート除外
+          ロング動画
         </Btn>
         <Btn active={prefs.shorts === "all"} onClick={() => onChange({ shorts: "all" })}>
           すべて
@@ -167,7 +168,6 @@ function FilterBar({ prefs, onChange }: { prefs: Prefs; onChange: (next: Partial
       <div className="ml-2 inline-flex rounded-full bg-zinc-800 p-1">
         <Btn active={prefs.sort === "trending"} onClick={() => onChange({ sort: "trending" })}>急上昇</Btn>
         <Btn active={prefs.sort === "points"} onClick={() => onChange({ sort: "points" })}>応援順</Btn>
-        <Btn active={prefs.sort === "newest"} onClick={() => onChange({ sort: "newest" })}>新着順</Btn>
       </div>
     </div>
   );
@@ -187,10 +187,13 @@ export default function TrendingPage() {
     }
   }, []);
 
+  const coerceSort = (s?: string | null): SortMode => (s === "trending" || s === "points" ? s : "trending");
+
   const init: Prefs = {
     range: ((search.get("range") as Range) ?? (saved.range as Range) ?? "1d"),
     shorts: ((search.get("shorts") as ShortsMode) ?? (saved.shorts as ShortsMode) ?? "exclude"),
-    sort: ((search.get("sort") as SortMode) ?? (saved.sort as SortMode) ?? "trending"),
+    // newest が残っていても trending に丸める
+    sort: coerceSort((search.get("sort") as string) ?? (saved.sort as string) ?? "trending"),
   };
 
   const [prefs, setPrefs] = useState<Prefs>(init);
@@ -267,9 +270,18 @@ export default function TrendingPage() {
 
   return (
     <main className="mx-auto max-w-7xl px-4 py-6 space-y-4">
-      <div className="flex items-center justify-between">
+      <div className="flex items-center justify-between gap-3">
         <h1 className="text-2xl md:text-3xl font-bold">急上昇（ロング優先）</h1>
-        <ContinueFromHistory />
+        <div className="flex items-center gap-2">
+          <Link
+            href="/saved"
+            prefetch={false}
+            className="inline-flex items-center gap-2 rounded-md bg-zinc-900 hover:bg-zinc-800 px-3 py-2 text-sm"
+          >
+            💾 保存ページ
+          </Link>
+          <ContinueFromHistory />
+        </div>
       </div>
 
       <FilterBar prefs={prefs} onChange={sync} />
