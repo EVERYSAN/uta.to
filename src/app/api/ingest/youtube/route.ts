@@ -139,8 +139,8 @@ export async function GET(req: Request) {
           durationSec: null, // 後で videos.list で入れる
           publishedAt,
           channelTitle,
-          viewCount: 0,
-          likeCount: 0,
+          view: 0,
+          like: 0,
         },
       })
     );
@@ -203,6 +203,7 @@ export async function GET(req: Request) {
     updated,
   });
 }
+
 
 
 
