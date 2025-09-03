@@ -1,15 +1,13 @@
+// src/lib/prisma.ts
 import { PrismaClient } from "@prisma/client";
 
-/**
- * Next.js (dev) の HMRでインスタンスが増殖しないようにグローバルに保持
- */
+/** HMR対策でグローバルに保持 */
 const globalForPrisma = globalThis as unknown as { prisma?: PrismaClient };
 
-const prisma =
+export const prisma =
   globalForPrisma.prisma ??
   new PrismaClient({
-    // ログは必要なら "query" などを足す
-    log: [],
+    log: [], // 必要なら "query" など追加
   });
 
 if (process.env.NODE_ENV !== "production") {
