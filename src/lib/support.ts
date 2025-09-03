@@ -34,3 +34,15 @@ export function rangeToSince(range: "1d" | "7d" | "30d"): Date {
   const days = range === "30d" ? 30 : range === "7d" ? 7 : 1;
   return new Date(base.getTime() - days * 24 * 60 * 60 * 1000);
 }
+
+export const HOUR_MS = 3600_000;
+
+export function floorToHourUtc(d = new Date()): Date {
+  const x = new Date(d);
+  x.setUTCMinutes(0, 0, 0);
+  return x;
+}
+
+export function subHours(d: Date, hours: number) {
+  return new Date(d.getTime() - hours * HOUR_MS);
+}
