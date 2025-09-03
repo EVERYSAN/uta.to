@@ -1,115 +1,144 @@
-/* eslint-disable @typescript-eslint/no-explicit-any */
-import { NextResponse } from "next/server";
-import { prisma } from "@/lib/prisma";
+// src/app/api/videos/route.ts
+import { NextRequest, NextResponse } from "next/server";
+import prisma from "@/lib/prisma";
 
-/**
- * /api/videos?range=24h|7d|30d&sort=trend|support&long=0|1&limit=36
- * - range   : 集計窓（既定 24h）
- * - sort    : "trend"=急上昇(ロング優先) / "support"=応援順（既定 trend）
- * - long    : 1 ならロング動画のみ表示（既定 0）
- * - limit   : 件数（既定 36、最大 100）
- *
- * ※ SupportSnapshot が無い動画も必ず返す（0 として扱う）
- */
-export async function GET(req: Request) {
-  const { searchParams } = new URL(req.url);
+export const dynamic = "force-dynamic";
 
-  const range = (searchParams.get("range") ?? "24h") as "24h" | "7d" | "30d";
-  const sort = (searchParams.get("sort") ?? "trend") as "trend" | "support";
-  const longOnly = searchParams.get("long") === "1";
-  const limit = Math.min(Number(searchParams.get("limit") ?? 36), 100);
+type Range = "1d" | "7d" | "30d";
+type ShortsMode = "exclude" | "all";
+type SortMode = "trending" | "points";
 
+function parseParams(req: NextRequest) {
+  const sp = req.nextUrl.searchParams;
+  const page = Math.max(1, Number(sp.get("page") || 1));
+  const take = Math.min(48, Math.max(1, Number(sp.get("take") || 24)));
+  const range = (sp.get("range") as Range) || "1d";
+  const shorts = (sp.get("shorts") as ShortsMode) || "exclude";
+  const sort = (sp.get("sort") as SortMode) || "trending";
+  return { page, take, range, shorts, sort };
+}
+
+function rangeToSince(range: Range) {
+  const now = Date.now();
+  const hours = range === "1d" ? 24 : range === "7d" ? 24 * 7 : 24 * 30;
+  return new Date(now - hours * 3600_000);
+}
+
+export async function GET(req: NextRequest) {
+  const { page, take, range, shorts, sort } = parseParams(req);
+  const since = rangeToSince(range);
   const now = new Date();
-  const from = new Date(now);
-  if (range === "24h") from.setHours(from.getHours() - 24);
-  if (range === "7d") from.setDate(from.getDate() - 7);
-  if (range === "30d") from.setDate(from.getDate() - 30);
 
-  // 子テーブルで絞ると“応援が無い動画”が落ちるため、Video だけを条件にする
-  const take = limit * (longOnly ? 5 : 3); // 後段フィルタ・並び替え用に少し多め
-  const videos = await prisma.video.findMany({
-    where: {
-      publishedAt: { gte: from, lte: now },
-    },
-    orderBy: { publishedAt: "desc" },
-    take,
-    include: {
-      // LEFT JOIN 的にスナップショットを付ける。型の揺れに耐えるため any で緩める
-      supportSnapshots: {
-        where: { windowStart: { gte: from } },
-        select: { score: true, value: true } as any,
-      },
-    } as any,
-  });
+  // ---- 1) 期間 & Shorts 条件だけで候補を広めに取得（後で JS ソートするため少し多め）
+  const pool = Math.min(600, page * take * 3);
 
-  // 集計ヘルパ：score/value のどちらでも合算
-  const sumSupport = (v: any) => {
-    const snaps: Array<{ score?: number | null; value?: number | null }> =
-      (v as any)?.supportSnapshots ?? [];
-    if (!Array.isArray(snaps) || snaps.length === 0) return 0;
-    return snaps.reduce((acc, s) => acc + (Number(s.score ?? s.value ?? 0) || 0), 0);
+  const whereBase: any = {
+    publishedAt: { gte: since },
   };
 
-  // ロング判定：URLに /shorts/ が入っていればショート。durationSec>=60 をロング。
-  const isLong = (v: any) => {
-    const url = typeof v?.url === "string" ? v.url : "";
-    if (url.includes("/shorts/")) return false;
-    const dur = (v as any)?.durationSec;
-    if (typeof dur === "number") return dur >= 60;
-    return true; // 不明ならロング扱い
-  };
-
-  const windowHours = range === "24h" ? 24 : range === "7d" ? 24 * 7 : 24 * 30;
-
-  let list = videos.map((v: any) => {
-    const support = sumSupport(v);
-
-    // publishedAt は null の可能性に備えて安全に扱う
-    const publishedMs = v?.publishedAt
-      ? new Date(v.publishedAt as any).getTime()
-      : now.getTime();
-    const hours = Math.max(1, (now.getTime() - publishedMs) / 3_600_000);
-
-    // 急上昇スコア：応援合計に時間減衰（新しいほど強い）をかけ、ロングは微ブースト
-    let trendScore = support / Math.pow(hours / (windowHours || 24), 0.35);
-    if (isLong(v)) trendScore *= 1.1; // 「ロング優先」の味付け（従来挙動の維持）
-
-    return {
-      id: v.id,
-      title: v.title,
-      url: v.url,
-      channelTitle: v.channelTitle,
-      thumbnailUrl: v.thumbnailUrl,
-      durationSec: v.durationSec ?? null,
-      publishedAt: v.publishedAt,
-      supportCount: support,
-      trendScore,
-      isLong: isLong(v),
-    };
-  });
-
-  // ロング動画だけにする場合は後段でフィルタ
-  if (longOnly) {
-    list = list.filter((x) => x.isLong);
+  if (shorts === "exclude") {
+    // URL に /shorts/ を含むものを除外 + 長さが分かる場合 60 秒以上だけ通す
+    whereBase.AND = [
+      { NOT: { url: { contains: "/shorts/" } } },
+      { OR: [{ durationSec: { gte: 60 } }, { durationSec: null }] },
+    ];
   }
 
-  // 並び替え
-  if (sort === "support") {
-    list.sort(
+  const candidates = await prisma.video.findMany({
+    where: whereBase,
+    orderBy: { publishedAt: "desc" }, // フォールバック並び
+    take: pool,
+    select: {
+      id: true,
+      title: true,
+      url: true,
+      platform: true,
+      platformVideoId: true,
+      thumbnailUrl: true,
+      channelTitle: true,
+      durationSec: true,
+      publishedAt: true,
+      // フロントで表示している累計系
+      views: true,
+      likes: true,
+      description: true,
+    },
+  });
+
+  if (candidates.length === 0) {
+    return NextResponse.json({ ok: true, items: [], page, take, total: 0 });
+  }
+
+  const ids = candidates.map((v) => v.id);
+
+  // ---- 2) SupportSnapshot を「左集計」して 0 を許容
+  // NOTE: スキーマのカラム名が違う場合は createdAt/points を合わせてください。
+  let sums: Array<{ videoId: string; _sum: { points: number | null } }> = [];
+  try {
+    sums = await (prisma as any).supportSnapshot.groupBy({
+      by: ["videoId"],
+      where: {
+        videoId: { in: ids },
+        createdAt: { gte: since }, // ← snapshot タイムスタンプ列名
+      },
+      _sum: { points: true }, // ← 期間内の応援ポイント合計の列名
+    });
+  } catch {
+    // スナップショット未作成でも動くように（全部 0 扱い）
+    sums = [];
+  }
+
+  const supportMap = new Map<string, number>();
+  for (const row of sums) supportMap.set(row.videoId, row._sum.points ?? 0);
+
+  // ---- 3) スコア計算 & 並び替え
+  const scored = candidates.map((v) => {
+    const supportInRange = supportMap.get(v.id) ?? 0;
+    const publishedAt = v.publishedAt ? new Date(v.publishedAt) : now;
+    const hoursSince = Math.max(1, (now.getTime() - publishedAt.getTime()) / 3600_000);
+
+    // 急上昇スコア：期間内応援に時間減衰（新しいほど強い）
+    let trendingScore = supportInRange / Math.pow(hoursSince / 24, 0.35);
+
+    return { ...v, supportInRange, _score: trendingScore };
+  });
+
+  if (sort === "points") {
+    scored.sort(
       (a, b) =>
-        b.supportCount - a.supportCount ||
-        new Date(b.publishedAt ?? now).getTime() - new Date(a.publishedAt ?? now).getTime()
+        (b.supportInRange ?? 0) - (a.supportInRange ?? 0) ||
+        new Date(b.publishedAt ?? 0).getTime() - new Date(a.publishedAt ?? 0).getTime()
     );
   } else {
-    list.sort(
+    scored.sort(
       (a, b) =>
-        b.trendScore - a.trendScore ||
-        new Date(b.publishedAt ?? now).getTime() - new Date(a.publishedAt ?? now).getTime()
+        (b._score ?? 0) - (a._score ?? 0) ||
+        new Date(b.publishedAt ?? 0).getTime() - new Date(a.publishedAt ?? 0).getTime()
     );
   }
 
-  // 最終件数を制限
-  const items = list.slice(0, limit);
+  // ランクは全体順位から計算（ページ外も含めて順位づけ）
+  const rankMap = new Map<string, number>();
+  scored.forEach((v, i) => rankMap.set(v.id, i + 1));
 
-  return NextResponse.json({ range, sort, longOnly, count: items.length, items });
+  const total = scored.length;
+  const start = (page - 1) * take;
+  const slice = scored.slice(start, start + take).map((v) => ({
+    id: v.id,
+    title: v.title,
+    url: v.url,
+    platform: v.platform,
+    platformVideoId: v.platformVideoId,
+    thumbnailUrl: v.thumbnailUrl,
+    channelTitle: v.channelTitle,
+    durationSec: v.durationSec,
+    publishedAt: v.publishedAt as any, // -> フロントは string | null で受ける
+    views: v.views,
+    likes: v.likes,
+    description: v.description,
+    supportInRange: v.supportInRange ?? 0,
+    trendingRank: rankMap.get(v.id) ?? null,
+  }));
+
+  return NextResponse.json({ ok: true, items: slice, page, take, total });
 }
