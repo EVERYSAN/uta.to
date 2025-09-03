@@ -251,18 +251,18 @@ export default function TrendingPage() {
   return (
     <main className="mx-auto max-w-7xl px-0 md:px-4 py-4 md:py-6 space-y-4">
       {/* ▼ 見出しをロゴに置換 */}
-      <div className="px-4">
-        <div className="flex items-center">
+      <div className="mx-auto max-w-screen-xl px-4 md:px-6 pt-4">
+        <div className="flex items-end gap-6">
           <Image
             src="/buzz-uta.png"
             alt="BUZZ UTA"
-            width={192}
-            height={192}
+            width={512}
+            height={512}
             priority
-            className="h-10 w-auto md:h-14"
+            // スマホ: 44 → タブレット: 72 → デスクトップ: 96
+            className="w-44 md:w-72 lg:w-96 h-auto"
+            sizes="(min-width: 1024px) 384px, (min-width: 768px) 288px, 176px"
           />
-          {/* アクセシビリティ用に元見出しは sr-only で残す */}
-          <span className="sr-only">急上昇（ロング優先）</span>
         </div>
       </div>
 
