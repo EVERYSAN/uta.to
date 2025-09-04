@@ -122,20 +122,23 @@ async function getVideoDetails(key: string, ids: string[]) {
 import { NextResponse } from "next/server";
 // import { prisma } from "@/lib/prisma"; // あなたのプロジェクトのパスに合わせて
 
-export const runtime = "nodejs"; // Edge でなく Node.js を推奨（DB ライブラリ的に）
-
 export async function GET(req: Request) {
-  const url = new URL(req.url);
-  const token = url.searchParams.get("token");
-
-  if (!process.env.CRON_SECRET || token !== process.env.CRON_SECRET) {
+  if (!requireCronAuth(req)) {
     return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
   }
 
-  // ここで YouTube 取得→DB 書き込み
-  // const inserted = await insertVideos();
-  return NextResponse.json({ ok: true /*, inserted*/ });
-}
+  const url = new URL(req.url);
+  const debug = url.searchParams.get("debug") === "1";
+  const dryRun = url.searchParams.get("dry") === "1";
+  const explicitSince = url.searchParams.get("since");
+
+  const keys = getApiKeys();
+  if (keys.length === 0) {
+    return NextResponse.json(
+      { ok: false, error: "YOUTUBE_API_KEY(S) not set" },
+      { status: 500 }
+    );
+  }
 
 
   // 既定の探索開始点：DBの最新 publishedAt か、なければ now - DEFAULT_LOOKBACK_HOURS
