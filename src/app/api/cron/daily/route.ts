@@ -119,7 +119,7 @@ async function getVideoDetails(key: string, ids: string[]) {
   return map;
 }
 
-import { NextResponse } from "next/server";
+
 // import { prisma } from "@/lib/prisma"; // あなたのプロジェクトのパスに合わせて
 
 export async function GET(req: Request) {
