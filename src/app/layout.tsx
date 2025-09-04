@@ -1,66 +1,50 @@
 // src/app/layout.tsx
-import type { Metadata } from "next";
-import "./globals.css";
-import Link from "next/link";
-import Image from "next/image";
+import './globals.css';
+import type { Metadata } from 'next';
+import Link from 'next/link';
 
 export const metadata: Metadata = {
-  title: "BUZZ UTA",
-  description: "歌ってみた・急上昇まとめ",
+  metadataBase: new URL('https://uta-to.vercel.app'),
+  title: { default: 'uta.to', template: '%s | uta.to' },
+  description: '歌ってみたを横断検索 / 新着・人気・高評価でソート可能',
+  openGraph: {
+    title: 'uta.to',
+    description: '歌ってみたを横断検索',
+    url: 'https://uta-to.vercel.app',
+    siteName: 'uta.to',
+    images: ['/og.png'],
+    locale: 'ja_JP',
+    type: 'website',
+  },
+  twitter: { card: 'summary_large_image' },
+  robots: { index: true, follow: true },
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
-    <html lang="ja" className="bg-zinc-950 text-zinc-100">
-      <body className="min-h-dvh">
-        {/* ===== Desktop Header (md↑) ===== */}
-        <header className="hidden md:block sticky top-0 z-40 bg-zinc-950/80 backdrop-blur border-b border-zinc-900">
-          <div className="mx-auto max-w-screen-xl px-4 h-14 flex items-center justify-between">
-            {/* ← ロゴをホームリンクに */}
-            <Link href="/" className="flex items-center gap-3">
-              <Image
-                src="/buzz-uta.png"
-                alt="BUZZ UTA"
-                width={28}
-                height={28}
-                className="w-7 h-7 rounded-md"
-                priority
-              />
-              <span className="sr-only">ホーム</span>
-            </Link>
-
-            {/* 右側ナビ（保存だけ） */}
-            <nav className="flex items-center gap-6">
-              <Link
-                href="/saved"
-                className="text-sm text-zinc-300 hover:text-white"
-              >
-                保存
-              </Link>
-            </nav>
-          </div>
-        </header>
-
-        {/* ===== Main ===== */}
-        <main className="pb-16 md:pb-0">{children}</main>
-
-        {/* ===== Mobile Bottom Nav (～md) ===== */}
-        <nav className="md:hidden fixed bottom-0 inset-x-0 z-40 border-t border-zinc-800 bg-zinc-950/95 backdrop-blur">
-          <div className="mx-auto max-w-screen-sm grid grid-cols-2">
-            <Link
-              href="/"
-              className="h-12 flex items-center justify-center gap-1 text-sm text-zinc-300 hover:text-white"
-            >
+    <html lang="ja">
+      <head>
+        {/* YouTube を速くするための事前接続 */}
+        <link rel="preconnect" href="https://www.youtube.com" />
+        <link rel="preconnect" href="https://www.youtube-nocookie.com" />
+        <link rel="preconnect" href="https://i.ytimg.com" />
+        <link rel="preconnect" href="https://s.ytimg.com" />
+      </head>
+      <body className="min-h-screen bg-white text-gray-900">
+        <header className="border-b">
+          <nav className="mx-auto max-w-screen-xl px-4 py-3 flex gap-4 text-sm">
+            <Link href="/" className="underline-offset-4 hover:underline">
               ホーム
             </Link>
-            <Link
-              href="/saved"
-              className="h-12 flex items-center justify-center gap-1 text-sm text-zinc-300 hover:text-white"
-            >
-              保存
+            <Link href="/trending" className="underline-offset-4 hover:underline">
+              急上昇
             </Link>
-          </div>
-        </nav>
+          </nav>
+        </header>
+
+        <main className="mx-auto max-w-screen-xl px-4 py-6">
+          {children}
+        </main>
       </body>
     </html>
   );
