@@ -2,89 +2,71 @@
 import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 
-export const runtime = "nodejs";
-export const dynamic = "force-dynamic";
+export const runtime = "nodejs"; // Prisma は Node で
 
-// 例: range=24h|7d|30d（デフォルト7d）
-function parseRangeToHours(range?: string) {
-  switch (range) {
-    case "24h":
-      return 24;
-    case "30d":
-      return 30 * 24;
-    case "7d":
-    default:
-      return 7 * 24;
-  }
+type Range = "24h" | "7d" | "30d";
+
+function since(range: Range) {
+  const now = Date.now();
+  if (range === "7d") return new Date(now - 7 * 24 * 60 * 60 * 1000);
+  if (range === "30d") return new Date(now - 30 * 24 * 60 * 60 * 1000);
+  return new Date(now - 24 * 60 * 60 * 1000);
 }
 
 export async function GET(req: Request) {
   try {
     const url = new URL(req.url);
-    const rangeParam = url.searchParams.get("range") ?? "7d";
-    const hours = parseRangeToHours(rangeParam);
-    const since = new Date(Date.now() - hours * 60 * 60 * 1000);
+    const range = (url.searchParams.get("range") as Range) || "24h";
+    const take = Math.min(Math.max(Number(url.searchParams.get("take") || 20), 1), 100);
 
-    // ① SupportEvent を期間内で集計
-    const groups = await prisma.supportEvent.groupBy({
+    const g = await prisma.supportEvent.groupBy({
       by: ["videoId"],
-      where: { createdAt: { gte: since } },
-      _sum: { amount: true },
-      orderBy: { _sum: { amount: "desc" } },
-      take: 50,
+      where: { createdAt: { gte: since(range) } },
+      _count: { videoId: true },
+      orderBy: { _count: { videoId: "desc" } },
+      take,
     });
 
-    if (groups.length === 0) {
-      return NextResponse.json({
-        ok: true,
-        range: rangeParam,
-        since: since.toISOString(),
-        total: 0,
-        items: [],
-      });
+    if (g.length === 0) {
+      const res = NextResponse.json({ ok: true, items: [] as any[] });
+      res.headers.set("Cache-Control", "no-store");
+      return res;
     }
 
-    // ② 対象の Video 情報を取得
-    const ids = groups.map((g) => g.videoId);
+    const ids = g.map((r) => r.videoId);
     const videos = await prisma.video.findMany({
       where: { id: { in: ids } },
       select: {
         id: true,
         title: true,
+        channelTitle: true,
         url: true,
         thumbnailUrl: true,
+        durationSec: true,
+        publishedAt: true,
         views: true,
         likes: true,
-        publishedAt: true,
       },
     });
     const vmap = new Map(videos.map((v) => [v.id, v]));
 
-    // ③ 集計値（supportPoints相当）を付けて並べ替えで返す
-    const items = groups
-      .map((g) => {
-        const v = vmap.get(g.videoId);
+    const items = g
+      .map((r) => {
+        const v = vmap.get(r.videoId);
         if (!v) return null;
         return {
-          ...v,
-          supportPoints: g._sum.amount ?? 0, // ← 計算で作る
+          videoId: r.videoId,
+          support: r._count.videoId,
+          video: v,
         };
       })
-      .filter(Boolean) as Array<
-      typeof videos[number] & { supportPoints: number }
-    >;
+      .filter(Boolean);
 
-    return NextResponse.json({
-      ok: true,
-      range: rangeParam,
-      since: since.toISOString(),
-      total: items.length,
-      items,
-    });
-  } catch (e: any) {
-    return NextResponse.json(
-      { ok: false, error: String(e?.message ?? e) },
-      { status: 500 }
-    );
+    const res = NextResponse.json({ ok: true, items });
+    res.headers.set("Cache-Control", "no-store");
+    return res;
+  } catch (err) {
+    console.error("GET /api/support/ranking failed:", err);
+    return NextResponse.json({ ok: false, error: "internal_error" }, { status: 500 });
   }
 }
