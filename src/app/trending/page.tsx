@@ -6,14 +6,6 @@ import { Suspense, useEffect, useRef, useState } from "react";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import HeroCarousel from "@/components/HeroCarousel";
 import { fetchTrendingWithSupport } from "@/lib/trending";
-import { unstable_noStore as noStore } from "next/cache";
-noStore();
-
-// fetch
-const res = await fetch(
-  `${process.env.NEXT_PUBLIC_BASE_URL}/api/videos?range=1d&sort=support&shorts=${shorts}`,
-  { cache: "no-store", next: { revalidate: 0 } }
-);
 
 export const dynamic = "force-dynamic";
 
