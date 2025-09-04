@@ -50,7 +50,7 @@ export default function HeroCarousel() {
           "relative w-full overflow-hidden rounded-2xl border border-white/10 bg-neutral-900/40",
           // 画面幅ごとにアスペクトを薄く + 高さ上限
           "aspect-[16/9] sm:aspect-[16/8] md:aspect-[21/9] lg:aspect-[21/8] xl:aspect-[21/7]",
-          "max-h-[180px] md:max-h-[210px]",
+          "max-h-[360px] md:max-h-[420px]",
         ].join(" ")}
       >
         <Link href={`/v/${active.id}`} className="block h-full w-full">
