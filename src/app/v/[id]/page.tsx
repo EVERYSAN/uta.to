@@ -1,4 +1,6 @@
 // src/app/v/[id]/page.tsx
+"use client";
+
 import { PrismaClient } from '@prisma/client';
 import { notFound } from 'next/navigation';
 import Link from 'next/link';
@@ -6,6 +8,7 @@ import ClientBits from './ClientBits';
 import YouTubeShortPlayer from '@/components/YouTubeShortPlayer';
 import HistoryMarker from '@/components/HistoryMarker';
 import SupportButton from '@/components/SupportButton';
+import { useState, useTransition } from "react";
 
 export const dynamic = 'force-dynamic';
 
