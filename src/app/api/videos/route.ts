@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
-import { prisma, Prisma } from "@/lib/prisma"; // prisma の re-export を使っている前提
+import { prisma } from "@/lib/prisma"; // prisma の re-export を使っている前提
+import { Prisma } from "@prisma/client";
 
 type Range = "1d" | "7d" | "30d";
 type ShortsMode = "all" | "exclude";
