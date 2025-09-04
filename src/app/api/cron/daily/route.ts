@@ -19,6 +19,12 @@ function getApiKeys(): string[] {
   return keys.split(",").map(s => s.trim()).filter(Boolean);
 }
 
+function toIntOrUndef(s?: string): number | undefined {
+  if (s == null) return undefined;
+  const n = parseInt(s, 10);
+  return Number.isFinite(n) ? n : undefined;
+}
+
 function parseBool(sp: URLSearchParams, key: string) {
   const v = sp.get(key);
   return v === "1" || v === "true" || v === "yes";
@@ -206,8 +212,8 @@ for (const i of items) {
     thumbnailUrl: sn?.thumbnails?.high?.url ?? sn?.thumbnails?.medium?.url ?? null,
     durationSec: durSec,
     publishedAt: new Date(sn?.publishedAt ?? Date.now()),
-    views: toIntOrNull(det?.statistics?.viewCount),
-    likes: toIntOrNull(det?.statistics?.likeCount),
+    views: toIntOrUndef(det?.statistics?.viewCount),
+    likes: toIntOrUndef(det?.statistics?.likeCount),
   });
 }
 
