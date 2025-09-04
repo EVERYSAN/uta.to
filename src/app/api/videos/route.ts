@@ -1,6 +1,14 @@
 // src/app/api/videos/route.ts
+
 import { NextResponse } from "next/server";
 import { PrismaClient, Prisma } from "@prisma/client";
+
+// ← これが今回のポイント（静的化を禁止）
+export const dynamic = "force-dynamic";
+export const revalidate = 0;
+export const fetchCache = "force-no-store";
+// （任意）VercelでEdgeを使っていないならnodejsを明示
+export const runtime = "nodejs";
 
 const prisma = new PrismaClient();
 
@@ -68,7 +76,7 @@ export async function GET(req: Request) {
 
     const from = rangeToFrom(range);
     const baseWhere: Prisma.VideoWhereInput = {
-      publishedAt: { gte: from }, // null は除外される（期間比較できないため）
+      publishedAt: { gte: from }, // null は期間比較不可なので除外
       ...(shortsWhere(shorts) ?? {}),
     };
 
@@ -85,7 +93,7 @@ export async function GET(req: Request) {
             title: true,
             channelTitle: true,
             url: true,
-            thumbnailUrl: true, // ← thumbnail ではなく thumbnailUrl
+            thumbnailUrl: true, // ← thumbnailではなくthumbnailUrl
             durationSec: true,
             publishedAt: true,
             views: true,
@@ -153,7 +161,7 @@ export async function GET(req: Request) {
       const publishedAtMs = v.publishedAt ? new Date(v.publishedAt).getTime() : now; // null ガード
       const ageHours = Math.max(1, (now - publishedAtMs) / 3600_000);
 
-      // 応援テーブルがなくても成立する簡易スコア
+      // 応援データ無しでも成立する簡易スコア
       const base = (v.likes ?? 0) + (v.views ?? 0) / 50;
       let trend = base / Math.pow(ageHours / 24, 0.35);
 
@@ -167,12 +175,9 @@ export async function GET(req: Request) {
     const total = scored.length;
     const pageItems = scored.slice(offset, offset + take).map(({ _score, ...rest }) => rest);
 
-    // デバッグ用: ?debug=1 で where等を返す（ステータス200のまま）
-    const debug = searchParams.get("debug") ? {
-      where: baseWhere,
-      pool: pool.length,
-      from,
-    } : undefined;
+    const debug = searchParams.get("debug")
+      ? { where: baseWhere, pool: pool.length, from }
+      : undefined;
 
     return NextResponse.json({
       ok: true,
@@ -180,7 +185,6 @@ export async function GET(req: Request) {
       items: pageItems,
     });
   } catch (err: any) {
-    // 500 を返すとフロントが何も見えないので、200でエラー内容を返す
     console.error("[/api/videos] error", err);
     return NextResponse.json(
       { ok: false, error: String(err?.message || err) },
