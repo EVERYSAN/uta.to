@@ -68,7 +68,7 @@ export default function SupportButton({ videoId, initialPoints }: Props) {
           <span className="inline-flex items-center gap-2">
             <HeartIcon className="h-5 w-5 drop-shadow" filled={celebrate || duplicated} />
             <span className="whitespace-nowrap">
-              {duplicated ? '今日の応援 済み' : busy ? '送信中…' : '応援するよ！ +1'}
+              {duplicated ? '今日の応援 済み' : busy ? '送信中…' : '応援する！ +1'}
             </span>
           </span>
         </button>
