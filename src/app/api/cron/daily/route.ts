@@ -187,41 +187,29 @@ export async function GET(req: Request) {
   const details = await getVideoDetails(usedKey || keys[0], videoIds);
 
   // Prisma に渡す形へマッピング
-  const rows: Prisma.VideoCreateManyInput[] = items
-  .map((i) => {
-    const vid = i.id?.videoId;
-    if (!vid) return null; // videoId が無いものは除外
+// Prisma に渡す形へマッピング
+const rows: Prisma.VideoCreateManyInput[] = [];
+for (const i of items) {
+  const vid = i.id?.videoId;
+  if (!vid) continue; // videoId が無いものはスキップ
 
-    const sn = i.snippet;
-    const det = details.get(vid);
-    const durSec = parseISODurationToSeconds(det?.contentDetails?.duration);
+  const sn = i.snippet;
+  const det = details.get(vid);
+  const durSec = parseISODurationToSeconds(det?.contentDetails?.duration) ?? null;
 
-    const thumb =
-      sn?.thumbnails?.high?.url ??
-      sn?.thumbnails?.medium?.url ??
-      undefined;
-
-    return {
-      // 必須
-      platform: "youtube",
-      platformVideoId: vid,
-
-      // ここからフィールド
-      title: sn?.title ?? "(no title)",
-      channelTitle: sn?.channelTitle ?? "",               // ← String(非NULL)には空文字で
-      url: `https://www.youtube.com/watch?v=${vid}`,
-
-      // Optional は undefined で安全に
-      thumbnailUrl: thumb,
-      durationSec: durSec ?? undefined,
-      publishedAt: sn?.publishedAt ? new Date(sn.publishedAt) : new Date(),
-      views: toIntOrNull(det?.statistics?.viewCount) ?? undefined,
-      likes: toIntOrNull(det?.statistics?.likeCount) ?? undefined,
-      // description など他に保存したいものがあればここで追加
-    };
-  })
-  .filter((x): x is Prisma.VideoCreateManyInput => !!x);
-
+  rows.push({
+    platform: "youtube",
+    platformVideoId: vid, // スキーマにある前提
+    title: sn?.title ?? "(no title)",
+    channelTitle: sn?.channelTitle ?? null,
+    url: `https://www.youtube.com/watch?v=${vid}`,
+    thumbnailUrl: sn?.thumbnails?.high?.url ?? sn?.thumbnails?.medium?.url ?? null,
+    durationSec: durSec,
+    publishedAt: new Date(sn?.publishedAt ?? Date.now()),
+    views: toIntOrNull(det?.statistics?.viewCount),
+    likes: toIntOrNull(det?.statistics?.likeCount),
+  });
+}
 
   // 書き込み（重複で全体が落ちないように skipDuplicates）
   let inserted = 0;
