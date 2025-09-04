@@ -207,23 +207,6 @@ function FilterBar({
   );
 }
 
-export default async function TrendingPage({
-  searchParams,
-}: { searchParams: Record<string, string | string[] | undefined> }) {
-  const range = (searchParams.range as "1d" | "7d" | "30d") || "1d";
-  const shorts = (searchParams.shorts as "all" | "exclude") || "all";
-
-  const videos = await fetchTrendingWithSupport(range, shorts);
-
-  return (
-    <VideoGrid
-      videos={videos.map(v => ({
-        ...v,
-        support24h: v.support, // <- カードに渡すプロパティ名
-      }))}
-    />
-  );
-}
 
 /* ========= main ========= */
 function TrendingPageInner() {
