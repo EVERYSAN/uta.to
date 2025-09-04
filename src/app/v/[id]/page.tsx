@@ -1,41 +1,36 @@
 // src/app/v/[id]/page.tsx
-"use client";
+import { notFound } from "next/navigation";
+import Link from "next/link";
+import ClientBits from "./ClientBits";
+import YouTubeShortPlayer from "@/components/YouTubeShortPlayer";
+import HistoryMarker from "@/components/HistoryMarker";
+import SupportButton from "@/components/SupportButton";
+import { prisma } from "@/lib/prisma";
 
-import { PrismaClient } from '@prisma/client';
-import { notFound } from 'next/navigation';
-import Link from 'next/link';
-import ClientBits from './ClientBits';
-import YouTubeShortPlayer from '@/components/YouTubeShortPlayer';
-import HistoryMarker from '@/components/HistoryMarker';
-import SupportButton from '@/components/SupportButton';
-import { useState, useTransition } from "react";
-
-export const dynamic = 'force-dynamic';
-
-const prisma = new PrismaClient();
+export const dynamic = "force-dynamic";
 
 /* ---------- helpers ---------- */
-const nf = new Intl.NumberFormat('ja-JP');
-const fmt = (n?: number | null) => (typeof n === 'number' ? nf.format(n) : '0');
+const nf = new Intl.NumberFormat("ja-JP");
+const fmt = (n?: number | null) => (typeof n === "number" ? nf.format(n) : "0");
 const fmtDate = (dt?: string | Date | null) => {
-  if (!dt) return '';
-  const d = typeof dt === 'string' ? new Date(dt) : dt;
-  if (isNaN(d.getTime())) return '';
+  if (!dt) return "";
+  const d = typeof dt === "string" ? new Date(dt) : dt;
+  if (isNaN(d.getTime())) return "";
   const y = d.getFullYear();
-  const m = String(d.getMonth() + 1).padStart(2, '0');
-  const day = String(d.getDate()).padStart(2, '0');
-  const hh = String(d.getHours()).padStart(2, '0');
-  const mm = String(d.getMinutes()).padStart(2, '0');
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  const hh = String(d.getHours()).padStart(2, "0");
+  const mm = String(d.getMinutes()).padStart(2, "0");
   return `${y}/${m}/${day} ${hh}:${mm}`;
 };
 const secsToLabel = (s?: number | null) => {
-  if (s == null) return '';
+  if (s == null) return "";
   const h = Math.floor(s / 3600);
   const m = Math.floor((s % 3600) / 60);
   const sec = Math.floor(s % 60);
   return h > 0
-    ? `${h}:${String(m).padStart(2, '0')}:${String(sec).padStart(2, '0')}`
-    : `${m}:${String(sec).padStart(2, '0')}`;
+    ? `${h}:${String(m).padStart(2, "0")}:${String(sec).padStart(2, "0")}`
+    : `${m}:${String(sec).padStart(2, "0")}`;
 };
 
 /** URL/ID/shorts から 11桁のYouTube IDを抽出 */
@@ -45,19 +40,19 @@ function toYouTubeId(input?: string | null): string | null {
 
   try {
     const u = new URL(input);
-    const host = u.hostname.replace(/^www\./, '');
-    const parts = u.pathname.split('/').filter(Boolean);
+    const host = u.hostname.replace(/^www\./, "");
+    const parts = u.pathname.split("/").filter(Boolean);
 
-    if (host === 'youtu.be' && parts[0] && /^[\w-]{11}/.test(parts[0])) {
+    if (host === "youtu.be" && parts[0] && /^[\w-]{11}/.test(parts[0])) {
       return parts[0].substring(0, 11);
     }
-    const v = u.searchParams.get('v');
+    const v = u.searchParams.get("v");
     if (v && /^[\w-]{11}/.test(v)) return v.substring(0, 11);
-    const i = parts.indexOf('embed');
+    const i = parts.indexOf("embed");
     if (i >= 0 && parts[i + 1] && /^[\w-]{11}/.test(parts[i + 1])) {
       return parts[i + 1].substring(0, 11);
     }
-    if (parts[0] === 'shorts' && parts[1] && /^[\w-]{11}/.test(parts[1])) {
+    if (parts[0] === "shorts" && parts[1] && /^[\w-]{11}/.test(parts[1])) {
       return parts[1].substring(0, 11);
     }
   } catch {
@@ -95,33 +90,35 @@ export default async function VideoDetailPage({ params }: Params) {
     channelTitle: true,
     views: true,
     likes: true,
-    supportPoints: true, // ← 追加
+    supportPoints: true, // 応援ポイント
   } as const;
 
-  let v =
-    (await prisma.video.findUnique({ where: { id: idParam }, select })) ??
+  const byId = await prisma.video.findUnique({ where: { id: idParam }, select });
+  const byPlatformId =
+    byId ??
     (await prisma.video.findFirst({
       where: { platformVideoId: idParam },
       select,
     }));
 
+  const v = byPlatformId;
   if (!v) notFound();
 
-  const idOrUrl = v.platformVideoId || v.url || '';
+  const idOrUrl = v.platformVideoId || v.url || "";
   const ytId = toYouTubeId(idOrUrl);
 
   const isShort =
-    (typeof v.durationSec === 'number' ? v.durationSec <= 60 : false) ||
+    (typeof v.durationSec === "number" ? v.durationSec <= 60 : false) ||
     /(^|\/)shorts(\/|$)/.test(idOrUrl);
 
   // 関連（同チャンネル優先→直近補完）
   let related = await prisma.video.findMany({
     where: {
       id: { not: v.id },
-      platform: { equals: 'youtube', mode: 'insensitive' },
+      platform: { equals: "youtube", mode: "insensitive" },
       ...(v.channelTitle ? { channelTitle: v.channelTitle } : {}),
     },
-    orderBy: [{ publishedAt: 'desc' as const }],
+    orderBy: [{ publishedAt: "desc" as const }],
     take: 12,
     select: {
       id: true,
@@ -137,9 +134,9 @@ export default async function VideoDetailPage({ params }: Params) {
     const more = await prisma.video.findMany({
       where: {
         id: { not: v.id },
-        platform: { equals: 'youtube', mode: 'insensitive' },
+        platform: { equals: "youtube", mode: "insensitive" },
       },
-      orderBy: [{ publishedAt: 'desc' as const }],
+      orderBy: [{ publishedAt: "desc" as const }],
       take: 12 - related.length,
       select: {
         id: true,
@@ -158,30 +155,34 @@ export default async function VideoDetailPage({ params }: Params) {
       {/* 左：プレイヤー＆メタ */}
       <article className="lg:col-span-8 space-y-4">
         <div className="rounded-2xl overflow-hidden bg-black">
-          {v.platform?.toLowerCase() === 'youtube' ? (
+          {v.platform?.toLowerCase() === "youtube" ? (
             ytId ? (
               <YouTubeShortPlayer
                 videoId={ytId}
-                title={v.title ?? 'video'}
+                title={v.title ?? "video"}
                 isShort={isShort}
                 autoPlay={false}
               />
             ) : (
               <div className="w-full aspect-video grid place-items-center bg-zinc-900 text-zinc-200">
-                <a
-                  href={v.url ?? '#'}
-                  target="_blank"
-                  rel="noreferrer"
-                  className="rounded-lg bg-white text-black px-4 py-2 text-sm font-medium"
-                >
-                  YouTubeで開く ↗
-                </a>
+                {v.url ? (
+                  <a
+                    href={v.url}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="rounded-lg bg-white text-black px-4 py-2 text-sm font-medium"
+                  >
+                    YouTubeで開く ↗
+                  </a>
+                ) : (
+                  <span className="text-sm text-zinc-400">再生URLが見つかりません</span>
+                )}
               </div>
             )
           ) : (
             <iframe
-              src={v.url ?? ''}
-              title={v.title ?? 'video'}
+              src={v.url ?? ""}
+              title={v.title ?? "video"}
               className="w-full aspect-video"
               allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
               allowFullScreen
@@ -189,9 +190,7 @@ export default async function VideoDetailPage({ params }: Params) {
           )}
         </div>
 
-        <h1 className="text-xl md:text-2xl font-bold text-zinc-100">
-          {v.title}
-        </h1>
+        <h1 className="text-xl md:text-2xl font-bold text-zinc-100">{v.title}</h1>
 
         <div className="flex flex-wrap items-center gap-3 text-sm">
           <TrendingBadge />
@@ -200,11 +199,9 @@ export default async function VideoDetailPage({ params }: Params) {
           <span className="text-zinc-400">❤️ {fmt(v.likes)}</span>
 
           <span className="ml-auto" />
+
           {/* 応援ボタン（初期ポイント表示） */}
-          <SupportButton
-            videoId={v.id}
-            initialPoints={v.supportPoints ?? 0}
-          />
+          <SupportButton videoId={v.id} initialPoints={v.supportPoints ?? 0} />
 
           {/* YouTubeで開く導線（常設） */}
           {v.url && (
@@ -228,7 +225,7 @@ export default async function VideoDetailPage({ params }: Params) {
               チャンネル: <span className="font-medium">{v.channelTitle}</span>
             </div>
           )}
-          {typeof v.durationSec === 'number' && (
+          {typeof v.durationSec === "number" && (
             <div>長さ: {secsToLabel(v.durationSec)}</div>
           )}
         </div>
@@ -263,12 +260,12 @@ export default async function VideoDetailPage({ params }: Params) {
                   // eslint-disable-next-line @next/next/no-img-element
                   <img
                     src={r.thumbnailUrl}
-                    alt={r.title ?? ''}
+                    alt={r.title ?? ""}
                     loading="lazy"
                     className="absolute inset-0 w-full h-full object-cover"
                   />
                 )}
-                {typeof r.durationSec === 'number' && (
+                {typeof r.durationSec === "number" && (
                   <span className="absolute bottom-1 right-1 rounded bg-black/70 text-white text-[10px] px-1">
                     {secsToLabel(r.durationSec)}
                   </span>
