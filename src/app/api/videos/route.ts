@@ -23,17 +23,14 @@ function sinceFromRange(range: Range): Date {
   }
 }
 
-/** shorts 除外の条件（URL に /shorts/ を含まない & 60 秒超 or 未設定） */
-function buildShortsWhere(shorts: Shorts) {
-  if (shorts === "exclude") {
-    return {
-      AND: [
-        { OR: [{ durationSec: null }, { durationSec: { gt: 60 } }] },
-        { NOT: { url: { contains: "/shorts/" } } },
-      ],
-    } as const;
-  }
-  return {};
+/** shorts=exclude のときの where を Prisma 型で返す（readonly を避ける） */
+function buildShortsWhere(shorts: Shorts): Prisma.VideoWhereInput {
+  if (shorts !== "exclude") return {};
+  const and: Prisma.VideoWhereInput[] = [
+    { OR: [{ durationSec: null }, { durationSec: { gt: 60 } }] },
+    { NOT: { url: { contains: "/shorts/" } } },
+  ];
+  return { AND: and };
 }
 
 export async function GET(req: Request) {
@@ -57,9 +54,9 @@ export async function GET(req: Request) {
   if (sort !== "support") {
     let orderBy: Prisma.VideoOrderByWithRelationInput;
     if (sort === "views") {
-      orderBy = { views: "desc" }; // 'desc' は SortOrder
+      orderBy = { views: "desc" };
     } else {
-      // 'trending' / 'latest'
+      // 'trending' / 'latest' は新しい順
       orderBy = { publishedAt: "desc" };
     }
 
