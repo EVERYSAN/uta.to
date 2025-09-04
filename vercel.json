@@ -1,10 +1,10 @@
 {
   "crons": [
     {
-      "path": "/api/cron/daily?token=${CRON_TOKEN}"",
+      "path": "/api/cron/daily?token=${CRON_TOKEN}",
       "schedule": "0 * * * *"
     },
-    { "path": "/api/cron/snapshot?token=${CRON_TOKEN}"",
+    { "path": "/api/cron/snapshot?token=${CRON_TOKEN}",
       "schedule": "5 * * * *" 
     }
   ]
