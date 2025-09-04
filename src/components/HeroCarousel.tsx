@@ -1,133 +1,105 @@
-// src/components/HeroCarousel.tsx
-'use client';
+"use client";
 
-import Link from 'next/link';
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useState } from "react";
+import Link from "next/link";
 
-type Video = {
+type HeroItem = {
   id: string;
   title: string;
-  thumbnailUrl?: string;
-  channelTitle?: string;
-  supportPoints?: number | null;
+  channelTitle: string | null;
+  thumbnailUrl: string | null;
+  publishedAt: string | null;
+  supportPoints: number | null;
 };
 
-async function fetchSupportTop(take = 10): Promise<Video[]> {
-  try {
-    const qs = new URLSearchParams({
-      sort: 'support',
-      range: '1d',
-      shorts: 'all',
-      page: '1',
-      take: String(take),
-    });
-    const res = await fetch(`/api/videos?${qs.toString()}`, { cache: 'no-store' });
-    const json = await res.json();
-    return Array.isArray(json?.items) ? json.items : [];
-  } catch (e) {
-    console.error('[HeroCarousel] fetch error', e);
-    return [];
-  }
-}
-
-/**
- * 上部ヒーローのカルーセル。
- * - NEXT_PUBLIC_HERO_PINNED_IDS=「/v/:id」に出てくる内部IDをカンマ区切りで
- *   2件まで指定可能（例: abc123,def456）
- * - 残りは応援(24h)の上位から自動で補完
- */
-export default function HeroCarousel({ size = 5 }: { size?: number }) {
-  const [rows, setRows] = useState<Video[]>([]);
+export default function HeroCarousel() {
+  const [items, setItems] = useState<HeroItem[]>([]);
   const [idx, setIdx] = useState(0);
-  const timerRef = useRef<number | null>(null);
+  const [err, setErr] = useState<string>("");
 
   useEffect(() => {
     let cancelled = false;
 
     (async () => {
-      const pinnedIds = (process.env.NEXT_PUBLIC_HERO_PINNED_IDS || '')
-        .split(',')
-        .map((s) => s.trim())
-        .filter(Boolean);
-
-      const candidates = await fetchSupportTop(12);
-
-      // ピン留め（指定順を優先）
-      const byId = new Map(candidates.map((v) => [v.id, v]));
-      const pinned = pinnedIds
-        .map((id) => byId.get(id))
-        .filter(Boolean) as Video[];
-
-      // 重複除去して残りを補完
-      const pinnedSet = new Set(pinned.map((v) => v.id));
-      const rest = candidates.filter((v) => !pinnedSet.has(v.id));
-
-      const finalRows = [...pinned, ...rest].slice(0, size);
-
-      if (!cancelled) setRows(finalRows);
+      try {
+        const r = await fetch("/api/hero", { cache: "no-store" });
+        if (!r.ok) throw new Error(`${r.status} ${r.statusText}`);
+        const json = await r.json();
+        const arr: HeroItem[] = Array.isArray(json?.items) ? json.items : [];
+        if (!cancelled) {
+          setItems(arr);
+        }
+      } catch (e: any) {
+        if (!cancelled) setErr(e?.message ?? "fetch_error");
+      }
     })();
 
     return () => {
       cancelled = true;
     };
-  }, [size]);
+  }, []);
 
-  // 自動スライド
+  // 5秒ごとに自動スライド（アイテムがある時だけ）
   useEffect(() => {
-    if (rows.length <= 1) return;
-    if (timerRef.current) window.clearInterval(timerRef.current);
-    timerRef.current = window.setInterval(() => {
-      setIdx((i) => (i + 1) % rows.length);
-    }, 6000);
-    return () => {
-      if (timerRef.current) window.clearInterval(timerRef.current);
-    };
-  }, [rows.length]);
+    if (items.length === 0) return;
+    const t = setInterval(() => {
+      setIdx((i) => (i + 1) % items.length);
+    }, 5000);
+    return () => clearInterval(t);
+  }, [items.length]);
 
-  if (rows.length === 0) return null;
+  const active = useMemo(() => items[idx], [items, idx]);
 
-  const cur = rows[idx];
+  // 何も出せるものがないなら静かに何も描画しない（クラッシュ防止）
+  if (err || items.length === 0 || !active) {
+    return null;
+  }
 
   return (
-    <div className="relative mb-4 overflow-hidden rounded-2xl bg-zinc-900 aspect-[21/9]">
-      {cur.thumbnailUrl ? (
-        // eslint-disable-next-line @next/next/no-img-element
-        <img
-          src={cur.thumbnailUrl}
-          alt={cur.title}
-          className="absolute inset-0 h-full w-full object-cover"
-          loading="lazy"
-        />
-      ) : null}
-      <div className="absolute inset-0 bg-gradient-to-tr from-black/70 via-black/30 to-transparent" />
+    <section className="mb-6">
+      <div className="relative w-full overflow-hidden rounded-2xl bg-neutral-900/40 border border-white/10">
+        {/* サムネイル */}
+        <Link href={`/v/${active.id}`} className="block">
+          {/* next/image だと外部ドメイン許可が必要なので img を使用 */}
+          <img
+            src={active.thumbnailUrl ?? "/og.png"}
+            alt={active.title}
+            className="aspect-[16/6] w-full object-cover"
+            onError={(e) => {
+              (e.currentTarget as HTMLImageElement).src = "/og.png";
+            }}
+          />
+        </Link>
 
-      <div className="absolute inset-0 flex items-end p-6">
-        <div className="max-w-3xl">
-          <div className="text-xs text-zinc-300 mb-1">💜 {cur.supportPoints ?? 0} pt</div>
-          <Link
-            href={`/v/${cur.id}`}
-            className="block text-xl md:text-2xl font-bold text-white leading-tight line-clamp-2 hover:underline"
-            prefetch={false}
-          >
-            {cur.title}
-          </Link>
-          {cur.channelTitle && (
-            <div className="text-sm text-zinc-300 mt-1">🎤 {cur.channelTitle}</div>
-          )}
+        {/* テキストオーバーレイ */}
+        <div className="absolute inset-x-0 bottom-0 p-4 md:p-6 bg-gradient-to-t from-black/70 to-transparent">
+          <div className="flex flex-col md:flex-row md:items-end md:justify-between gap-3">
+            <div className="min-w-0">
+              <Link href={`/v/${active.id}`}>
+                <h2 className="text-xl md:text-2xl font-bold line-clamp-2">
+                  {active.title}
+                </h2>
+              </Link>
+              <p className="text-sm opacity-80 mt-1 line-clamp-1">
+                {active.channelTitle ?? "不明なチャンネル"}
+              </p>
+            </div>
+
+            <div className="flex items-center gap-2">
+              {items.map((_, i) => (
+                <button
+                  key={i}
+                  aria-label={`slide ${i + 1}`}
+                  onClick={() => setIdx(i)}
+                  className={`h-2 w-2 rounded-full transition-all ${
+                    i === idx ? "w-6 bg-white" : "bg-white/40 hover:bg-white/70"
+                  }`}
+                />
+              ))}
+            </div>
+          </div>
         </div>
       </div>
-
-      {/* ドットインジケータ */}
-      <div className="absolute right-4 bottom-4 flex gap-2">
-        {rows.map((_, i) => (
-          <button
-            key={i}
-            aria-label={`slide ${i + 1}`}
-            onClick={() => setIdx(i)}
-            className={`h-2 w-2 rounded-full ${i === idx ? 'bg-white' : 'bg-white/40'}`}
-          />
-        ))}
-      </div>
-    </div>
+    </section>
   );
 }
