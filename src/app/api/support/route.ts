@@ -2,45 +2,59 @@
 import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 
-export const runtime = "nodejs"; // Prisma なので Node を明示
+export const runtime = "nodejs";      // Prisma は edge で動かさない
+export const dynamic = "force-dynamic"; // キャッシュ無効
+export const revalidate = 0;
 
-function since24h() {
-  return new Date(Date.now() - 24 * 60 * 60 * 1000);
+function json(data: any, init: number = 200) {
+  return NextResponse.json(data, {
+    status: init,
+    headers: { "Cache-Control": "no-store" },
+  });
+}
+
+export async function GET(req: Request) {
+  const url = new URL(req.url);
+  const videoId = url.searchParams.get("videoId") ?? url.searchParams.get("id");
+  if (!videoId) return json({ ok: false, error: "missing_videoId" }, 400);
+
+  try {
+    const v = await prisma.video.findFirst({
+      where: { OR: [{ id: videoId }, { platformVideoId: videoId }] },
+      select: { supportPoints: true },
+    });
+    if (!v) return json({ ok: false, error: "not_found" }, 404);
+    return json({ ok: true, points: v.supportPoints ?? 0 });
+  } catch (e: any) {
+    return json({ ok: false, error: "internal_error", detail: e?.message }, 500);
+  }
 }
 
 export async function POST(req: Request) {
   try {
-    const body = await req.json().catch(() => ({}));
-    const videoId = typeof body?.videoId === "string" ? body.videoId : "";
-    if (!videoId) {
-      return NextResponse.json({ ok: false, error: "bad_request" }, { status: 400 });
-    }
+    const body = await req.json().catch(() => null);
+    const videoId = body?.videoId ?? body?.id;
+    if (!videoId) return json({ ok: false, error: "missing_videoId" }, 400);
 
-    // 応援イベントを記録（スキーマに合わせて最小構成）
-    await prisma.supportEvent.create({ data: { videoId } });
+    // id / platformVideoId どちらでもヒットするように
+    const target = await prisma.video.findFirst({
+      where: { OR: [{ id: videoId }, { platformVideoId: videoId }] },
+      select: { id: true },
+    });
+    if (!target) return json({ ok: false, error: "not_found" }, 404);
 
-    // 24h 件数を返す（UI を即時更新できるように）
-    const support24h = await prisma.supportEvent.count({
-      where: { videoId, createdAt: { gte: since24h() } },
+    // 応援ポイントを +1
+    const updated = await prisma.video.update({
+      where: { id: target.id },
+      data: { supportPoints: { increment: 1 } },
+      select: { supportPoints: true },
     });
 
-    const res = NextResponse.json({ ok: true, support24h });
-    res.headers.append("Set-Cookie", `su_${videoId}=1; Max-Age=86400; Path=/; SameSite=Lax`);
-    res.headers.set("Cache-Control", "no-store");
-    return res;
-  } catch (err) {
-    console.error("POST /api/support failed:", err);
-    return NextResponse.json({ ok: false, error: "internal_error" }, { status: 500 });
-  }
-}
+    // もしログ用テーブルが存在しない構成でも落ちないように完全に無視
+    // try { await prisma.supportLog.create({ data: { videoId: target.id } }); } catch {}
 
-// 任意：動作確認用
-export async function GET(req: Request) {
-  const { searchParams } = new URL(req.url);
-  const videoId = searchParams.get("videoId") || "";
-  if (!videoId) return NextResponse.json({ ok: true });
-  const support24h = await prisma.supportEvent.count({
-    where: { videoId, createdAt: { gte: since24h() } },
-  });
-  return NextResponse.json({ ok: true, support24h });
+    return json({ ok: true, points: updated.supportPoints ?? 0 });
+  } catch (e: any) {
+    return json({ ok: false, error: "internal_error", detail: e?.message }, 500);
+  }
 }
