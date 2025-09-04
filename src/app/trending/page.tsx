@@ -5,7 +5,6 @@ import Link from "next/link";
 import { Suspense, useEffect, useRef, useState } from "react";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import HeroCarousel from "@/components/HeroCarousel";
-import { fetchTrendingWithSupport } from "@/lib/trending";
 
 export const dynamic = "force-dynamic";
 
@@ -51,9 +50,9 @@ type Video = {
   likes?: number | null;
   trendingRank?: number | null;
   trendingScore?: number | null;
-  /** 追加：期間内の応援ポイント（API で返す） */
+  /** APIが返す期間内の応援ポイント（件数） */
   supportPoints?: number | null;
-  /** 追加：応援順位（API で返せるなら） */
+  /** （もしAPIが返すなら）応援順位 */
   supportRank?: number | null;
 };
 type ApiList = { ok: boolean; items: Video[]; page?: number; take?: number; total?: number };
@@ -122,7 +121,7 @@ function VideoCard({ v, range, sort }: { v: Video; range: Range; sort: SortMode 
         <div className="flex items-center gap-3 text-[12px] text-zinc-400">
           <span className="inline-flex items-center gap-1">👁 {fmtCount(v.views)}</span>
           <span className="inline-flex items-center gap-1">❤️ {fmtCount(v.likes)}</span>
-          {/* trending表示時も応援ptをサブ情報として出す */}
+          {/* 急上昇のときもサブ情報で期間内の応援ptを表示 */}
           {sort === "trending" && (
             <span className="inline-flex items-center gap-1">📣 {fmtCount(v.supportPoints)} pt</span>
           )}
@@ -241,7 +240,7 @@ function TrendingPageInner() {
     router.replace(`${pathname}?${qs.toString()}`, { scroll: false });
   };
 
-  // 条件が変わったら 1 ページ目から
+  // 条件が変わったら 1 ページ目から読み直し
   useEffect(() => {
     setItems([]);
     setPage(1);
@@ -255,9 +254,9 @@ function TrendingPageInner() {
     setLoading(true);
     try {
       const qs = new URLSearchParams();
-      qs.set("sort", sort);                 // ← 並び替え
-      qs.set("range", range);
-      qs.set("shorts", shorts);
+      qs.set("sort", sort);                 // ← 並び替え（trending/support）
+      qs.set("range", range);               // ← 24h/7d/30d を常に付与
+      qs.set("shorts", shorts);             // ← ショート除外対応
       qs.set("page", String(p));
       qs.set("take", "24");
 
@@ -309,8 +308,7 @@ function TrendingPageInner() {
 
   return (
     <main className="mx-auto max-w-7xl px-4 py-6 space-y-4">
-      <div className="flex items-center justify-between">
-      </div>
+      <div className="flex items-center justify-between" />
       
       <HeroCarousel />
       
