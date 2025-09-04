@@ -5,6 +5,7 @@ import Link from "next/link";
 import { Suspense, useEffect, useRef, useState } from "react";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import HeroCarousel from "@/components/HeroCarousel";
+import { fetchTrendingWithSupport } from "@/lib/trending";
 
 export const dynamic = "force-dynamic";
 
@@ -203,6 +204,24 @@ function FilterBar({
 
       <span className="text-xs text-zinc-500 ml-auto">並び: {sort === "support" ? "応援" : "急上昇"}</span>
     </div>
+  );
+}
+
+export default async function TrendingPage({
+  searchParams,
+}: { searchParams: Record<string, string | string[] | undefined> }) {
+  const range = (searchParams.range as "1d" | "7d" | "30d") || "1d";
+  const shorts = (searchParams.shorts as "all" | "exclude") || "all";
+
+  const videos = await fetchTrendingWithSupport(range, shorts);
+
+  return (
+    <VideoGrid
+      videos={videos.map(v => ({
+        ...v,
+        support24h: v.support, // <- カードに渡すプロパティ名
+      }))}
+    />
   );
 }
 
