@@ -1,256 +1,83 @@
 // src/app/api/cron/daily/route.ts
 import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
-import { Prisma } from "@prisma/client";
+import { revalidateTag, revalidatePath } from "next/cache";
+import type { Prisma } from "@prisma/client";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-const DEFAULT_QUERY = "歌ってみた";
-const DEFAULT_PAGES = 5;
-const DEFAULT_LOOKBACK_HOURS = 72; // DBが空のときのフェールバック
+function checkCronAuth(req: Request) { /* ←上の関数そのまま */ }
+async function withAdvisoryLock<T>(fn: () => Promise<T>) { /* ←上の関数そのまま */ }
+function toIntOrUndef(s?: string) { /* ←上の関数そのまま */ }
+function parseISODurationToSeconds(d?: string) { /* 既存のもの */ }
 
-// ---- helpers ----
-function getApiKeys(): string[] {
-  const keys =
-    process.env.YOUTUBE_API_KEYS ??
-    process.env.YOUTUBE_API_KEY ??
-    "";
-  return keys.split(",").map(s => s.trim()).filter(Boolean);
-}
-
-function toIntOrUndef(s?: string): number | undefined {
-  if (s == null) return undefined;
-  const n = parseInt(s, 10);
-  return Number.isFinite(n) ? n : undefined;
-}
-
-function parseBool(sp: URLSearchParams, key: string) {
-  const v = sp.get(key);
-  return v === "1" || v === "true" || v === "yes";
-}
-
-function iso(d: Date | string | number) {
-  return new Date(d).toISOString();
-}
-
-function authOK(req: Request) {
-  const fromVercelCron = req.headers.get("x-vercel-cron");
-  if (fromVercelCron) return true;
-  const secret = process.env.CRON_SECRET;
-  if (!secret) return true; // ローカル/開発用。Vercel本番は必ず入れる
-  const token = new URL(req.url).searchParams.get("token");
-  return token === secret;
-}
-
-// ISO8601 duration -> seconds
-function parseISODurationToSeconds(dur?: string): number | null {
-  if (!dur) return null;
-  const m = /^PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?$/.exec(dur);
-  if (!m) return null;
-  const h = m[1] ? parseInt(m[1], 10) : 0;
-  const mm = m[2] ? parseInt(m[2], 10) : 0;
-  const s = m[3] ? parseInt(m[3], 10) : 0;
-  return h * 3600 + mm * 60 + s;
-}
-
-const INT_MAX = 2147483647;
-function toIntOrNull(s?: string) {
-  if (!s) return null;
-  const n = Number(s);
-  if (!Number.isFinite(n)) return null;
-  const i = Math.floor(n);
-  if (i < 0 || i > INT_MAX) return null;
-  return i;
-}
-
-async function fetchJson<T>(url: string) {
-  const r = await fetch(url, { next: { revalidate: 0 } });
-  if (!r.ok) {
-    const text = await r.text().catch(() => "");
-    throw new Error(`HTTP ${r.status} ${r.statusText} for ${url}\n${text}`);
-  }
-  return (await r.json()) as T;
-}
-
-type YTSearchItem = {
-  id: { videoId: string };
-  snippet: {
-    title: string;
-    channelTitle: string;
-    publishedAt: string;
-    thumbnails?: { medium?: { url?: string }; high?: { url?: string } };
-  };
-};
-
-type YTVideosItem = {
-  id: string;
-  contentDetails?: { duration?: string };
-  statistics?: { viewCount?: string; likeCount?: string };
-};
-
-async function searchYoutubeSince(
-  key: string,
-  query: string,
-  publishedAfterISO: string,
-  maxPages: number,
-) {
-  const items: YTSearchItem[] = [];
-  let pageToken = "";
-  for (let page = 0; page < maxPages; page++) {
-    const url = new URL("https://www.googleapis.com/youtube/v3/search");
-    url.searchParams.set("key", key);
-    url.searchParams.set("part", "snippet");
-    url.searchParams.set("type", "video");
-    url.searchParams.set("maxResults", "50");
-    url.searchParams.set("order", "date");
-    url.searchParams.set("q", query);
-    url.searchParams.set("publishedAfter", publishedAfterISO);
-    if (pageToken) url.searchParams.set("pageToken", pageToken);
-
-    const json = await fetchJson<any>(url.toString());
-    (json.items as any[] | undefined)?.forEach((i) => items.push(i));
-    pageToken = json.nextPageToken ?? "";
-    if (!pageToken) break;
-  }
-  return items;
-}
-
-async function getVideoDetails(key: string, ids: string[]) {
-  if (ids.length === 0) return new Map<string, YTVideosItem>();
-  const map = new Map<string, YTVideosItem>();
-  for (let i = 0; i < ids.length; i += 50) {
-    const chunk = ids.slice(i, i + 50);
-    const url = new URL("https://www.googleapis.com/youtube/v3/videos");
-    url.searchParams.set("key", key);
-    url.searchParams.set("part", "contentDetails,statistics");
-    url.searchParams.set("id", chunk.join(","));
-    const json = await fetchJson<any>(url.toString());
-    (json.items as any[] | undefined)?.forEach((it) => {
-      map.set(it.id, it);
-    });
-  }
-  return map;
-}
-
-// ---- handler ----
 export async function GET(req: Request) {
-  if (!authOK(req)) {
-    return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
-  }
+  const auth = checkCronAuth(req);
+  if (!auth.ok) return NextResponse.json({ ok:false, error:"unauthorized" }, { status: 401 });
 
-  const sp = new URL(req.url).searchParams;
-  const debug = parseBool(sp, "debug");
-  const dry = parseBool(sp, "dry");
-  const pages = Number(sp.get("pages") ?? DEFAULT_PAGES);
-  const query = sp.get("q") ?? DEFAULT_QUERY;
-  const lookbackHours = Number(sp.get("lookbackHours") ?? DEFAULT_LOOKBACK_HOURS);
-  const sinceParam = sp.get("since"); // 任意で上書きしたいとき
+  const url = new URL(req.url);
+  const debug = url.searchParams.get("debug") === "1";
+  const dryRun = url.searchParams.get("dry") === "1";
 
-  const t0 = Date.now();
-  const keys = getApiKeys();
-  if (!keys.length) {
-    return NextResponse.json({ ok: false, error: "Missing YOUTUBE_API_KEY(S)" }, { status: 500 });
-  }
-
-  // どこから取得するか（DBの最新publishedAtか、フェールバック）
-  let since = new Date(Date.now() - lookbackHours * 3600_000); // fallback
-  if (!sinceParam) {
-    const latest = await prisma.video.findFirst({
-      where: { platform: "youtube" },
-      orderBy: { publishedAt: "desc" },
-      select: { publishedAt: true },
-    });
-    if (latest?.publishedAt) {
-      // 取りこぼし防止で fallback と比較して新しすぎないように
-      const fb = since.getTime();
-      since = new Date(Math.min(latest.publishedAt.getTime(), Date.now()));
-      if (since.getTime() < fb) since = new Date(fb);
+  return withAdvisoryLock(async () => {
+    const since = new Date(Date.now() - 1000 * 60 * 60 * 72); // 72h 既定
+    const keys = (process.env.YOUTUBE_API_KEYS ?? process.env.YOUTUBE_API_KEY ?? "")
+      .split(",").map(s => s.trim()).filter(Boolean);
+    if (keys.length === 0) {
+      return NextResponse.json({ ok:false, error:"NO_YOUTUBE_KEY" }, { status: 500 });
     }
-  } else {
-    since = new Date(sinceParam);
-  }
 
-  // 取得
-  let items: YTSearchItem[] = [];
-  let usedKey = "";
-  let fetchErr: any = null;
-  for (const key of keys) {
-    try {
-      usedKey = key;
-      items = await searchYoutubeSince(key, query, iso(since), pages);
-      if (items.length) break;
-    } catch (e) {
-      fetchErr = e;
-      continue;
+    // 1) 収集
+    const items = await collectYoutube(keys, "歌ってみた", since); // ←既存の収集関数に合わせて
+
+    // 2) 追加で動画詳細を取得（duration, stats）
+    const detMap = await getVideoDetails(keys[0], items.map(i => i.id?.videoId).filter(Boolean));
+
+    // 3) rows へマップ（null 排除, undefined 許容）
+    const rows: Prisma.VideoCreateManyInput[] = items
+      .map(i => {
+        const vid = i.id?.videoId;
+        if (!vid) return null;
+        const det = detMap.get(vid);
+        return {
+          platform: "youtube",
+          platformVideoId: vid,
+          title: i.snippet?.title ?? "",
+          channelTitle: i.snippet?.channelTitle ?? "",
+          url: `https://www.youtube.com/watch?v=${vid}`,
+          thumbnailUrl: i.snippet?.thumbnails?.high?.url ?? i.snippet?.thumbnails?.medium?.url,
+          durationSec: parseISODurationToSeconds(det?.contentDetails?.duration) ?? undefined,
+          publishedAt: new Date(i.snippet?.publishedAt ?? Date.now()),
+          views: toIntOrUndef(det?.statistics?.viewCount),
+          likes: toIntOrUndef(det?.statistics?.likeCount),
+        };
+      })
+      .filter((r): r is Prisma.VideoCreateManyInput => r !== null);
+
+    // 4) 書き込み（idempotent）
+    const result = dryRun
+      ? { count: 0 }
+      : await prisma.video.createMany({ data: rows, skipDuplicates: true });
+
+    // 5) 再検証
+    if (!dryRun && result.count > 0) {
+      try {
+        revalidateTag("videos-newest");
+        revalidateTag("trending-1d");
+        revalidateTag("trending-7d");
+        revalidateTag("trending-30d");
+      } catch {}
+      // タグ未対応なら一旦:
+      // revalidatePath("/");
     }
-  }
-  if (!items.length && fetchErr) {
-    return NextResponse.json({ ok: false, error: String(fetchErr) }, { status: 502 });
-  }
 
-  const videoIds = items.map(i => i.id?.videoId).filter(Boolean) as string[];
-  const details = await getVideoDetails(usedKey || keys[0], videoIds);
-
-  // Prisma に渡す形へマッピング
-// Prisma に渡す形へマッピング
-const rows: Prisma.VideoCreateManyInput[] = [];
-for (const i of items) {
-  const vid = i.id?.videoId;
-  if (!vid) continue; // videoId が無いものはスキップ
-
-  const sn = i.snippet;
-  const det = details.get(vid);
-  const durSec = parseISODurationToSeconds(det?.contentDetails?.duration) ?? null;
-
-  rows.push({
-    platform: "youtube",
-    platformVideoId: vid, // スキーマにある前提
-    title: sn?.title ?? "(no title)",
-    channelTitle: sn?.channelTitle ?? null,
-    url: `https://www.youtube.com/watch?v=${vid}`,
-    thumbnailUrl: sn?.thumbnails?.high?.url ?? sn?.thumbnails?.medium?.url ?? null,
-    durationSec: durSec,
-    publishedAt: new Date(sn?.publishedAt ?? Date.now()),
-    views: toIntOrUndef(det?.statistics?.viewCount),
-    likes: toIntOrUndef(det?.statistics?.likeCount),
+    const payload = {
+      ok: true,
+      meta: { now: new Date().toISOString(), since: since.toISOString(), dryRun },
+      counts: { fetched: items.length, inserted: result.count },
+      sample: rows.slice(0, 3),
+    };
+    return NextResponse.json(debug ? payload : { ok: true, counts: payload.counts });
   });
-}
-
-  // 書き込み（重複で全体が落ちないように skipDuplicates）
-  let inserted = 0;
-  let prismaError: string | null = null;
-  if (!dry && rows.length) {
-    try {
-      const result = await prisma.video.createMany({
-        data: rows,
-        skipDuplicates: true, // これが重要（URLにユニーク制約がある想定）
-      });
-      inserted = result.count ?? 0;
-    } catch (e: any) {
-      prismaError = String(e?.message ?? e);
-    }
-  }
-
-  const body = {
-    ok: !prismaError,
-    meta: {
-      now: iso(Date.now()),
-      since: iso(since),
-      query,
-      pagesTried: pages,
-      usedKey: usedKey ? `${usedKey.slice(0, 6)}…` : null,
-      dryRun: dry,
-      tookMs: Date.now() - t0,
-    },
-    counts: {
-      fetched: items.length,
-      toInsert: rows.length,
-      inserted,
-    },
-    ...(debug ? { sample: rows.slice(0, 3) } : {}),
-    error: prismaError,
-  };
-
-  return NextResponse.json(body, prismaError ? { status: 500 } : { status: 200 });
 }
