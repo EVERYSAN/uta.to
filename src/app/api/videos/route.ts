@@ -56,7 +56,7 @@ export async function GET(req: Request) {
         // 関連の Video 側にフィルタを適用
         video: { is: videoBaseWhere },
       },
-      orderBy: { _count: { _all: "desc" } },
+      orderBy: { _count: { videoId: "desc" } },
       skip,
       take,
     });
