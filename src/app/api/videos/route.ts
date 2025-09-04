@@ -1,202 +1,194 @@
-import { NextResponse } from "next/server";
-import { PrismaClient } from "@prisma/client";
+// src/app/api/videos/route.ts
 
+import { NextResponse } from "next/server";
+import { PrismaClient, Prisma } from "@prisma/client";
+
+// ← これが今回のポイント（静的化を禁止）
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
+export const fetchCache = "force-no-store";
+// （任意）VercelでEdgeを使っていないならnodejsを明示
+export const runtime = "nodejs";
 
 const prisma = new PrismaClient();
 
-type Range = "1d" | "7d" | "30d";
-type ShortsMode = "all" | "exclude";
+// ---- helpers -------------------------------------------------
 
-export async function GET(req: Request) {
-  const url = new URL(req.url);
+type Range = "24h" | "7d" | "30d";
+type Shorts = "any" | "only" | "exclude";
+type Sort = "trending" | "latest" | "popular" | "support"; // supportはpopularにフォールバック
 
-  const range = (["1d", "7d", "30d"].includes(url.searchParams.get("range") || "")
-    ? (url.searchParams.get("range") as Range)
-    : "1d");
-
-  const shorts = (["all", "exclude"].includes(url.searchParams.get("shorts") || "")
-    ? (url.searchParams.get("shorts") as ShortsMode)
-    : "all");
-
-  const page = Math.max(1, parseInt(url.searchParams.get("page") || "1", 10) || 1);
-  const take = Math.min(100, Math.max(1, parseInt(url.searchParams.get("take") || "24", 10) || 24));
-
-  // ---- 厳密なローリング窓（UTC基準）----
-  const hours = range === "7d" ? 7 * 24 : range === "30d" ? 30 * 24 : 24;
-  const now = Date.now();
-  const since = new Date(now - hours * 3600_000);
-
-  // ---- WHERE ----
-  const baseWhere: any = {
-    platform: "youtube",
-    publishedAt: { gte: since },         // ← ここだけで厳密に絞る（拡張窓は撤廃）
-  };
-
-  // ショート除外: NOT( durationSec <= 60 OR url contains '/shorts/' OR platformVideoId contains '/shorts/' )
-  const excludeShortsWhere =
-    shorts === "exclude"
-      ? {
-          NOT: {
-            OR: [
-              { durationSec: { lte: 60 } },
-              { url: { contains: "/shorts/" } },
-              { platformVideoId: { contains: "/shorts/" } },
-            ],
-          },
-        }
-      : {};
-
-  const where = { AND: [baseWhere, excludeShortsWhere] };
-
-  // ---- 取得（まずは多めに取らず、厳密窓の中だけで取る）----
-  // 並びはシンプルに views desc → その後にスコアで安定化
-  const rows = await prisma.video.findMany({
-    where,
-    orderBy: [{ views: "desc" }],
-    take: take * 2, // 少し多めに（同率の並びが不安定なとき用）
-    select: {
-      id: true,
-      platform: true,
-      platformVideoId: true,
-      title: true,
-      url: true,
-      thumbnailUrl: true,
-      durationSec: true,
-      publishedAt: true,
-      channelTitle: true,
-      views: true,
-      likes: true,
-    },
-  });
-
-  // ---- トレンドスコア（軽め）----
-  const withScore = rows.map((v) => {
-    const views = Number(v.views || 0);
-    const likes = Number(v.likes || 0);
-    const published = v.publishedAt ? new Date(v.publishedAt).getTime() : now;
-    const ageH = Math.max(0, (now - published) / 3600_000);
-    const score = (views + 4 * likes) / Math.pow(ageH + 2, 1.3);
-    return { ...v, trendingScore: score };
-  });
-
-  withScore.sort((a, b) => (b.trendingScore! - a.trendingScore!));
-
-  // ---- ページング ----
-  const start = (page - 1) * take;
-  const items = withScore.slice(start, start + take);
-
-  return NextResponse.json(
-    {
-      ok: true,
-      items,
-      page,
-      take,
-      total: withScore.length,
-      window: { range, since: since.toISOString() }, // デバッグ用に返すと確認が楽
-    },
-    { headers: { "Cache-Control": "no-store, no-cache, max-age=0" } }
-  );
+function parseRange(v: string | undefined): Range {
+  return v === "7d" || v === "30d" ? v : "24h";
 }
-import { NextResponse } from "next/server";
-import { PrismaClient } from "@prisma/client";
+function parseShorts(v: string | undefined): Shorts {
+  return v === "only" || v === "exclude" ? v : "any";
+}
+function parseSort(v: string | undefined): Sort {
+  return v === "latest" || v === "popular" || v === "support" ? v : "trending";
+}
+function hoursAgo(h: number) {
+  return new Date(Date.now() - h * 3600_000);
+}
+function rangeToFrom(range: Range) {
+  if (range === "7d") return hoursAgo(24 * 7);
+  if (range === "30d") return hoursAgo(24 * 30);
+  return hoursAgo(24);
+}
 
-export const dynamic = "force-dynamic";
-export const revalidate = 0;
+// Prisma の where を組み立て（ショート/ロング）
+function shortsWhere(shorts: Shorts): Prisma.VideoWhereInput | undefined {
+  if (shorts === "any") return undefined;
 
-const prisma = new PrismaClient();
+  if (shorts === "only") {
+    // 「/shorts/」または 60 秒以下をショート扱い
+    return {
+      OR: [
+        { url: { contains: "/shorts/" } },
+        { durationSec: { lte: 60 } }, // null は含まれない
+      ],
+    };
+  }
 
-type Range = "1d" | "7d" | "30d";
-type ShortsMode = "all" | "exclude";
+  // exclude = ロングのみ
+  // 「/shorts/」を含まず、(durationSec >=61) または (durationSec が null)
+  return {
+    AND: [
+      { url: { not: { contains: "/shorts/" } } },
+      {
+        OR: [{ durationSec: { gte: 61 } }, { durationSec: { equals: null } }],
+      },
+    ],
+  };
+}
+
+// ---- GET -----------------------------------------------------
 
 export async function GET(req: Request) {
-  const url = new URL(req.url);
+  try {
+    const { searchParams } = new URL(req.url);
+    const range = parseRange(searchParams.get("range") || undefined);
+    const shorts = parseShorts(searchParams.get("shorts") || undefined);
+    const sort = parseSort(searchParams.get("sort") || undefined);
+    const page = Math.max(1, Number(searchParams.get("page") || "1"));
+    const take = Math.min(50, Math.max(1, Number(searchParams.get("take") || "24")));
+    const offset = (page - 1) * take;
 
-  const range = (["1d", "7d", "30d"].includes(url.searchParams.get("range") || "")
-    ? (url.searchParams.get("range") as Range)
-    : "1d");
+    const from = rangeToFrom(range);
+    const baseWhere: Prisma.VideoWhereInput = {
+      publishedAt: { gte: from }, // null は期間比較不可なので除外
+      ...(shortsWhere(shorts) ?? {}),
+    };
 
-  const shorts = (["all", "exclude"].includes(url.searchParams.get("shorts") || "")
-    ? (url.searchParams.get("shorts") as ShortsMode)
-    : "all");
-
-  const page = Math.max(1, parseInt(url.searchParams.get("page") || "1", 10) || 1);
-  const take = Math.min(100, Math.max(1, parseInt(url.searchParams.get("take") || "24", 10) || 24));
-
-  // ---- 厳密なローリング窓（UTC基準）----
-  const hours = range === "7d" ? 7 * 24 : range === "30d" ? 30 * 24 : 24;
-  const now = Date.now();
-  const since = new Date(now - hours * 3600_000);
-
-  // ---- WHERE ----
-  const baseWhere: any = {
-    platform: "youtube",
-    publishedAt: { gte: since },         // ← ここだけで厳密に絞る（拡張窓は撤廃）
-  };
-
-  // ショート除外: NOT( durationSec <= 60 OR url contains '/shorts/' OR platformVideoId contains '/shorts/' )
-  const excludeShortsWhere =
-    shorts === "exclude"
-      ? {
-          NOT: {
-            OR: [
-              { durationSec: { lte: 60 } },
-              { url: { contains: "/shorts/" } },
-              { platformVideoId: { contains: "/shorts/" } },
-            ],
+    // ---- 早いソートはDB側で ----
+    if (sort === "latest") {
+      const [items, total] = await Promise.all([
+        prisma.video.findMany({
+          where: baseWhere,
+          orderBy: { publishedAt: "desc" },
+          take,
+          skip: offset,
+          select: {
+            id: true,
+            title: true,
+            channelTitle: true,
+            url: true,
+            thumbnailUrl: true, // ← thumbnailではなくthumbnailUrl
+            durationSec: true,
+            publishedAt: true,
+            views: true,
+            likes: true,
           },
-        }
-      : {};
+        }),
+        prisma.video.count({ where: baseWhere }),
+      ]);
+      return NextResponse.json({
+        ok: true,
+        meta: { range, shorts, sort, page, take, total },
+        items,
+      });
+    }
 
-  const where = { AND: [baseWhere, excludeShortsWhere] };
+    if (sort === "popular" || sort === "support") {
+      const [items, total] = await Promise.all([
+        prisma.video.findMany({
+          where: baseWhere,
+          orderBy: [{ views: "desc" }, { likes: "desc" }, { publishedAt: "desc" }],
+          take,
+          skip: offset,
+          select: {
+            id: true,
+            title: true,
+            channelTitle: true,
+            url: true,
+            thumbnailUrl: true,
+            durationSec: true,
+            publishedAt: true,
+            views: true,
+            likes: true,
+          },
+        }),
+        prisma.video.count({ where: baseWhere }),
+      ]);
+      return NextResponse.json({
+        ok: true,
+        meta: { range, shorts, sort, page, take, total },
+        items,
+      });
+    }
 
-  // ---- 取得（まずは多めに取らず、厳密窓の中だけで取る）----
-  // 並びはシンプルに views desc → その後にスコアで安定化
-  const rows = await prisma.video.findMany({
-    where,
-    orderBy: [{ views: "desc" }],
-    take: take * 2, // 少し多めに（同率の並びが不安定なとき用）
-    select: {
-      id: true,
-      platform: true,
-      platformVideoId: true,
-      title: true,
-      url: true,
-      thumbnailUrl: true,
-      durationSec: true,
-      publishedAt: true,
-      channelTitle: true,
-      views: true,
-      likes: true,
-    },
-  });
+    // ---- trending は軽く計算して整列（DB 200 件くらいから）----
+    const poolSize = Math.max(take * 4, 120);
+    const pool = await prisma.video.findMany({
+      where: baseWhere,
+      orderBy: { publishedAt: "desc" },
+      take: poolSize,
+      select: {
+        id: true,
+        title: true,
+        channelTitle: true,
+        url: true,
+        thumbnailUrl: true,
+        durationSec: true,
+        publishedAt: true, // Date | null
+        views: true,
+        likes: true,
+      },
+    });
 
-  // ---- トレンドスコア（軽め）----
-  const withScore = rows.map((v) => {
-    const views = Number(v.views || 0);
-    const likes = Number(v.likes || 0);
-    const published = v.publishedAt ? new Date(v.publishedAt).getTime() : now;
-    const ageH = Math.max(0, (now - published) / 3600_000);
-    const score = (views + 4 * likes) / Math.pow(ageH + 2, 1.3);
-    return { ...v, trendingScore: score };
-  });
+    const now = Date.now();
+    const scored = pool.map((v) => {
+      const publishedAtMs = v.publishedAt ? new Date(v.publishedAt).getTime() : now; // null ガード
+      const ageHours = Math.max(1, (now - publishedAtMs) / 3600_000);
 
-  withScore.sort((a, b) => (b.trendingScore! - a.trendingScore!));
+      // 応援データ無しでも成立する簡易スコア
+      const base = (v.likes ?? 0) + (v.views ?? 0) / 50;
+      let trend = base / Math.pow(ageHours / 24, 0.35);
 
-  // ---- ページング ----
-  const start = (page - 1) * take;
-  const items = withScore.slice(start, start + take);
+      // ロング(>=61s) に微ブースト
+      if ((v.durationSec ?? 0) >= 61) trend *= 1.04;
 
-  return NextResponse.json(
-    {
+      return { ...v, _score: trend };
+    });
+
+    scored.sort((a, b) => b._score - a._score);
+    const total = scored.length;
+    const pageItems = scored.slice(offset, offset + take).map(({ _score, ...rest }) => rest);
+
+    const debug = searchParams.get("debug")
+      ? { where: baseWhere, pool: pool.length, from }
+      : undefined;
+
+    return NextResponse.json({
       ok: true,
-      items,
-      page,
-      take,
-      total: withScore.length,
-      window: { range, since: since.toISOString() }, // デバッグ用に返すと確認が楽
-    },
-    { headers: { "Cache-Control": "no-store, no-cache, max-age=0" } }
-  );
+      meta: { range, shorts, sort, page, take, total, debug },
+      items: pageItems,
+    });
+  } catch (err: any) {
+    console.error("[/api/videos] error", err);
+    return NextResponse.json(
+      { ok: false, error: String(err?.message || err) },
+      { status: 200 }
+    );
+  }
 }
