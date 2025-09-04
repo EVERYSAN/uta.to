@@ -1,160 +1,118 @@
-import { NextResponse } from "next/server";
-import prisma from "@/lib/prisma";
-
+// src/app/api/refresh/youtube/route.ts
 export const dynamic = "force-dynamic";
-export const revalidate = 0;
 
-type YtSearchItem = {
-  id?: { videoId?: string } | string;
-  snippet?: {
-    title?: string;
-    channelTitle?: string;
-    publishedAt?: string;
-    thumbnails?: {
-      maxres?: { url?: string };
-      high?: { url?: string };
-      medium?: { url?: string };
-      default?: { url?: string };
-    };
-  };
-};
+import { NextResponse } from "next/server";
+import { PrismaClient } from "@prisma/client";
+import { fetchDetails } from "@/lib/youtube";
 
-type YtSearchResponse = {
-  items?: YtSearchItem[];
-  error?: { message?: string };
-};
+const prisma = new PrismaClient();
 
-function pickThumb(it: YtSearchItem): string | undefined {
-  const t = it.snippet?.thumbnails;
-  return (
-    t?.maxres?.url ??
-    t?.high?.url ??
-    t?.medium?.url ??
-    t?.default?.url ??
-    undefined
-  );
-}
-
-function getVideoId(it: YtSearchItem): string | undefined {
-  if (!it) return undefined;
-  if (typeof it.id === "object" && it.id?.videoId) return it.id.videoId;
-  if (typeof it.id === "string") return it.id;
-  return undefined;
-}
-
+/**
+ * /api/refresh/youtube?ids=AaBb,BbCc
+ * or POST { "ids": ["AaBb", "BbCc"] }
+ */
 export async function GET(req: Request) {
   try {
-    const key = process.env.YOUTUBE_API_KEY;
-    if (!key) {
-      return NextResponse.json(
-        { ok: false, error: "YOUTUBE_API_KEY is missing" },
-        { status: 500 }
-      );
-    }
-
     const url = new URL(req.url);
-    const hours = Math.max(1, Number(url.searchParams.get("hours") ?? 24));
-    const limit = Math.min(50, Math.max(1, Number(url.searchParams.get("limit") ?? 30)));
-    const q = (url.searchParams.get("q") ?? "").trim();
-    const channelId = (url.searchParams.get("channelId") ?? "").trim();
-
-    const sinceIso = new Date(Date.now() - hours * 60 * 60 * 1000).toISOString();
-
-    const params = new URLSearchParams({
-      key,
-      part: "snippet",
-      maxResults: String(limit),
-      type: "video",
-      order: "date",
-      publishedAfter: sinceIso,
-    });
-    if (q) params.set("q", q);
-    if (channelId) params.set("channelId", channelId);
-
-    const apiUrl = `https://www.googleapis.com/youtube/v3/search?${params.toString()}`;
-
-    const res = await fetch(apiUrl, { cache: "no-store" });
-    if (!res.ok) {
-      const text = await res.text().catch(() => "");
-      return NextResponse.json(
-        {
-          ok: false,
-          route: "refresh/youtube",
-          error: `YouTube search failed: ${res.status}`,
-          details: text.slice(0, 500),
-        },
-        { status: 500 }
-      );
+    const idsParam = url.searchParams.get("ids") || "";
+    const ids = idsParam.split(",").map(s => s.trim()).filter(Boolean);
+    if (ids.length === 0) {
+      return NextResponse.json({ ok: false, error: "required: ids" }, { status: 400 });
     }
+    return NextResponse.json(await refreshByIds(ids), { headers: { "Cache-Control": "no-store" } });
+  } catch (e: any) {
+    return NextResponse.json({ ok: false, error: String(e?.message || e) }, { status: 500 });
+  }
+}
 
-    const data: YtSearchResponse = await res.json();
-    const items = data.items ?? [];
+export async function POST(req: Request) {
+  try {
+    const body = (await req.json().catch(() => ({}))) as any;
+    const ids: string[] = Array.isArray(body?.ids) ? body.ids : [];
+    if (ids.length === 0) {
+      return NextResponse.json({ ok: false, error: "required: JSON body { ids: string[] }" }, { status: 400 });
+    }
+    return NextResponse.json(await refreshByIds(ids), { headers: { "Cache-Control": "no-store" } });
+  } catch (e: any) {
+    return NextResponse.json({ ok: false, error: String(e?.message || e) }, { status: 500 });
+  }
+}
 
-    let processed = 0;
-    let created = 0;
-    let updated = 0;
-    let skipped = 0;
+async function refreshByIds(ids: string[]) {
+  const t0 = Date.now();
+  const details = await fetchDetails(ids);
+  const platform = "youtube";
 
-    for (const it of items) {
-      const videoId = getVideoId(it);
-      if (!videoId) {
-        skipped++;
+  let upserts = 0;
+  let skippedNoPublishedAt = 0;
+  const errors: string[] = [];
+
+  for (const v of details) {
+    try {
+      const platformVideoId = v.id;
+
+      // publishedAt は必須想定：無ければスキップ
+      if (!v.publishedAt) {
+        skippedNoPublishedAt++;
         continue;
       }
+      const publishedAt = new Date(v.publishedAt);
 
-      const title = it.snippet?.title ?? "(no title)";
-      const channelTitle = it.snippet?.channelTitle || undefined;
-      const publishedRaw = it.snippet?.publishedAt || undefined;
-      const publishedAt: Date | undefined = publishedRaw ? new Date(publishedRaw) : undefined;
-      const thumbnailUrl = pickThumb(it);
-      const watchUrl = `https://www.youtube.com/watch?v=${videoId}`;
+      // null/undefined を update に渡さない（条件付きスプレッドで省略）
+      const title: string | undefined = v.title ?? undefined;
+      const urlStr: string = `https://www.youtube.com/watch?v=${platformVideoId}`;
+      const thumbnailUrl: string | undefined = v.thumbnailUrl ?? undefined;
+      const channelTitle: string | undefined = v.channelTitle ?? undefined;
+      const durationSec: number | undefined = v.durationSec ?? undefined;
+      const views: number | undefined = v.views ?? undefined;
+      const likes: number | undefined = v.likes ?? undefined;
 
-      const exists = await prisma.video.findUnique({
-        where: { platform_platformVideoId: { platform: "youtube", platformVideoId: videoId } },
+      await prisma.video.upsert({
+        where: { platform_platformVideoId: { platform, platformVideoId } },
+        update: {
+          ...(title !== undefined ? { title } : {}),
+          url: urlStr,
+          ...(thumbnailUrl !== undefined ? { thumbnailUrl } : {}),
+          ...(channelTitle !== undefined ? { channelTitle } : {}),
+          ...(durationSec !== undefined ? { durationSec } : {}),
+          publishedAt,
+          ...(views !== undefined ? { views } : {}),
+          ...(likes !== undefined ? { likes } : {}),
+        },
+        create: {
+          platform,
+          platformVideoId,
+          title: title ?? "(untitled)",
+          url: urlStr,
+          thumbnailUrl: thumbnailUrl ?? "",
+          channelTitle: channelTitle ?? "",
+          durationSec,
+          publishedAt,
+          views,
+          likes,
+        },
         select: { id: true },
       });
 
-      // --- create オブジェクトは後から条件付きで代入 ---
-      const createData: any = {
-        platform: "youtube",
-        platformVideoId: videoId,
-        title,
-        url: watchUrl,
-      };
-      if (channelTitle) createData.channelTitle = channelTitle;
-      if (thumbnailUrl) createData.thumbnailUrl = thumbnailUrl;
-      if (publishedAt) createData.publishedAt = publishedAt; // Date を直接代入（Prisma は Date か ISO string を許容）
-
-      // --- update オブジェクトも同様に ---
-      const updateData: any = {
-        title,
-        url: watchUrl,
-      };
-      if (channelTitle) updateData.channelTitle = channelTitle;
-      if (thumbnailUrl) updateData.thumbnailUrl = thumbnailUrl;
-      if (publishedAt) updateData.publishedAt = publishedAt;
-
-      await prisma.video.upsert({
-        where: { platform_platformVideoId: { platform: "youtube", platformVideoId: videoId } },
-        create: createData,
-        update: updateData,
-      });
-
-      processed++;
-      exists ? updated++ : created++;
+      upserts++;
+    } catch (e: any) {
+      errors.push(String(e?.message || e));
     }
-
-    return NextResponse.json({
-      ok: true,
-      route: "refresh/youtube",
-      query: { q, channelId, hours, limit },
-      since: sinceIso,
-      counts: { processed, created, updated, skipped },
-    });
-  } catch (e: any) {
-    return NextResponse.json(
-      { ok: false, route: "refresh/youtube", error: e?.message ?? String(e) },
-      { status: 500 }
-    );
   }
+
+  const latest = await prisma.video.findFirst({
+    orderBy: [{ publishedAt: "desc" }],
+    select: { platform: true, publishedAt: true, createdAt: true },
+  });
+
+  return {
+    ok: true,
+    requested: ids.length,
+    fetched: details.length,
+    upserts,
+    skippedNoPublishedAt,
+    latest,
+    tookMs: Date.now() - t0,
+    errors: errors.length ? errors.slice(0, 5) : undefined,
+  };
 }
