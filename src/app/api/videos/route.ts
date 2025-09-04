@@ -3,100 +3,14 @@ import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import type { Prisma } from "@prisma/client";
 
-export const dynamic = "force-dynamic"; // 生成キャッシュを無効化
+export const dynamic = "force-dynamic"; // 生成キャッシュは常に無効化
 
-// range=1d|7d|30d, sort=hot|new|support, shorts=all|exclude|only
-export async function GET(req: Request) {
-  const sp = new URL(req.url).searchParams;
+type SortParam = "trending" | "support" | "hot" | "new";
+type RangeParam = "1d" | "7d" | "30d";
+type ShortsParam = "all" | "exclude" | "only";
 
-  const page  = Math.max(1, parseInt(sp.get("page") ?? "1", 10));
-  const take  = Math.min(100, Math.max(1, parseInt(sp.get("take") ?? "24", 10)));
-  const skip  = (page - 1) * take;
-
-  const range  = (sp.get("range")  ?? "1d").toLowerCase();
-  const sort   = (sp.get("sort")   ?? "hot").toLowerCase();
-  const shorts = (sp.get("shorts") ?? "all").toLowerCase();
-
-  // 期間境界（期間内集計にだけ使う）
-  const since = sinceFromRange(range);
-
-  // 97と同じ基本フィルタ（プラットフォーム固定＋期間＋ショート条件）
-  const where: Prisma.VideoWhereInput = {
-    platform: "youtube",
-    ...(since ? { publishedAt: { gte: since } } : {}),
-    ...buildShortsWhere(shorts),
-  };
-
-  // DB側の並び（「応援」は後でメモリソート）
-  let orderBy: Prisma.VideoOrderByWithRelationInput = { views: "desc" };
-  if (sort === "new") orderBy = { publishedAt: "desc" };
-
-  // 対象動画の取得
-  const videos = await prisma.video.findMany({
-    where,
-    orderBy,
-    skip,
-    take,
-    select: {
-      id: true,
-      platform: true,
-      platformVideoId: true,
-      title: true,
-      channelTitle: true,
-      url: true,
-      thumbnailUrl: true,
-      durationSec: true,
-      publishedAt: true,
-      views: true,
-      likes: true,
-    },
-  });
-
-  const ids = videos.map(v => v.id);
-
-  // -------- 追加：累計（createdAt フィルタ無し） --------
-  let totalMap = new Map<string, number>();
-  if (ids.length > 0) {
-    const total = await prisma.supportEvent.groupBy({
-      by: ["videoId"],
-      where: { videoId: { in: ids } },
-      _count: { _all: true },
-    });
-    totalMap = new Map(total.map(g => [g.videoId, g._count._all]));
-  }
-
-  // 期間内（これまで通り）
-  let rangeMap = new Map<string, number>();
-  if (ids.length > 0) {
-    const ranged = await prisma.supportEvent.groupBy({
-      by: ["videoId"],
-      where: { videoId: { in: ids }, createdAt: { gte: since } },
-      _count: { _all: true },
-    });
-    rangeMap = new Map(ranged.map(g => [g.videoId, g._count._all]));
-  }
-
-  // API レスポンス：期間内 + 累計 を両方載せる
-  let items = videos.map(v => ({
-    ...v,
-    supportPoints: rangeMap.get(v.id) ?? 0,  // 期間内（後方互換）
-    supportTotal:  totalMap.get(v.id) ?? 0,  // 累計（新規）
-  }));
-
-  // -------- 上書き：応援順は累計でソート --------
-  if (sort === "support") {
-    items.sort((a, b) => (b.supportTotal ?? 0) - (a.supportTotal ?? 0));
-  }
-
-  return NextResponse.json(
-    { ok: true, items, page, take },
-    { headers: { "Cache-Control": "no-store" } }
-  );
-}
-
-// ----- helpers -----
-
-function sinceFromRange(range: string | null): Date {
+// 期間境界
+function sinceFromRange(range: RangeParam | string | null): Date {
   const now = Date.now();
   const ms =
     range === "1d" ? 24 * 60 * 60 * 1000 :
@@ -105,8 +19,117 @@ function sinceFromRange(range: string | null): Date {
   return new Date(now - ms);
 }
 
-function buildShortsWhere(shorts: string | null): Prisma.VideoWhereInput | {} {
+// shorts フィルタ
+function buildShortsWhere(shorts: ShortsParam | string | null): Prisma.VideoWhereInput {
   if (shorts === "exclude") return { NOT: { url: { contains: "/shorts/" } } };
-  if (shorts === "only")    return {       url: { contains: "/shorts/" } };
+  if (shorts === "only")    return { url: { contains: "/shorts/" } };
   return {};
+}
+
+export async function GET(req: Request) {
+  const sp = new URL(req.url).searchParams;
+
+  const page  = Math.max(1, parseInt(sp.get("page") ?? "1", 10));
+  const take  = Math.min(100, Math.max(1, parseInt(sp.get("take") ?? "24", 10)));
+  const skip  = (page - 1) * take;
+
+  const range  = (sp.get("range")  ?? "1d").toLowerCase() as RangeParam;
+  const sort   = (sp.get("sort")   ?? "trending").toLowerCase() as SortParam;
+  const shorts = (sp.get("shorts") ?? "all").toLowerCase() as ShortsParam;
+
+  const since = sinceFromRange(range);
+
+  // 動画側の共通 where
+  const videoBaseWhere: Prisma.VideoWhereInput = {
+    platform: "youtube",
+    publishedAt: { gte: since },
+    ...buildShortsWhere(shorts),
+  };
+
+  // ========== 応援順：SupportEvent を期間で groupBy して直に並べ替え ==========
+  if (sort === "support") {
+    // SupportEvent を videoId ごとに集計・並び替え（期間・動画条件を満たすもの）
+    const grouped = await prisma.supportEvent.groupBy({
+      by: ["videoId"],
+      where: {
+        createdAt: { gte: since },
+        // 関連の Video 側にフィルタを適用
+        video: { is: videoBaseWhere },
+      },
+      orderBy: { _count: { _all: "desc" } },
+      skip,
+      take,
+    });
+
+    const ids = grouped.map(g => g.videoId);
+    if (ids.length === 0) {
+      return NextResponse.json(
+        { ok: true, items: [], page, take },
+        { headers: { "Cache-Control": "no-store" } }
+      );
+    }
+
+    // 取得した id の動画本体をまとめて取る
+    const videos = await prisma.video.findMany({
+      where: { id: { in: ids } },
+      select: {
+        id: true, platform: true, platformVideoId: true, title: true,
+        channelTitle: true, url: true, thumbnailUrl: true, durationSec: true,
+        publishedAt: true, views: true, likes: true,
+      },
+    });
+
+    // 順序維持のためマップ化 → groupBy の順に整列
+    const byId = new Map(videos.map(v => [v.id, v]));
+    const items = ids.map((id, i) => {
+      const v = byId.get(id);
+      const points = (grouped[i] as any)?._count?._all ?? 0;
+      return v
+        ? { ...v, supportPoints: points, supportRank: skip + i + 1 }
+        : null;
+    }).filter(Boolean);
+
+    return NextResponse.json(
+      { ok: true, items, page, take },
+      { headers: { "Cache-Control": "no-store" } }
+    );
+  }
+
+  // ========== 急上昇/新着：従来通り DB ソート ==========
+  const orderBy: Prisma.VideoOrderByWithRelationInput =
+    sort === "new" || sort === "hot" ? { publishedAt: "desc" } : { views: "desc" };
+
+  const videos = await prisma.video.findMany({
+    where: videoBaseWhere,
+    orderBy,
+    skip,
+    take,
+    select: {
+      id: true, platform: true, platformVideoId: true, title: true,
+      channelTitle: true, url: true, thumbnailUrl: true, durationSec: true,
+      publishedAt: true, views: true, likes: true,
+    },
+  });
+
+  // 表示用：同じ期間で SupportEvent を件数集計 → 合成（一覧の補助情報）
+  let supportMap = new Map<string, number>();
+  if (videos.length) {
+    const ids = videos.map(v => v.id);
+    const grouped = await prisma.supportEvent.groupBy({
+      by: ["videoId"],
+      where: { videoId: { in: ids }, createdAt: { gte: since } },
+      _count: { _all: true },
+    });
+    supportMap = new Map(grouped.map(g => [g.videoId, (g as any)._count._all as number]));
+  }
+
+  const items = videos.map(v => ({
+    ...v,
+    supportPoints: supportMap.get(v.id) ?? 0,
+  }));
+
+  return NextResponse.json(
+    { ok: true, items, page, take },
+    { headers: { "Cache-Control": "no-store" } }
+  );
 }
