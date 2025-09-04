@@ -5,7 +5,6 @@ import Link from "next/link";
 import { Suspense, useEffect, useRef, useState } from "react";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 
-// SSRのプリレンダー絡みを避ける（任意）
 export const dynamic = "force-dynamic";
 
 /* ========= utils ========= */
@@ -32,6 +31,10 @@ const secsToLabel = (s?: number | null) => {
 };
 
 /* ========= types ========= */
+type SortMode = "trending" | "support";
+type Range = "1d" | "7d" | "30d";
+type ShortsMode = "all" | "exclude";
+
 type Video = {
   id: string;
   platform: "youtube";
@@ -46,11 +49,15 @@ type Video = {
   likes?: number | null;
   trendingRank?: number | null;
   trendingScore?: number | null;
+  /** 追加：期間内の応援ポイント（API で返す） */
+  supportPoints?: number | null;
+  /** 追加：応援順位（API で返せるなら） */
+  supportRank?: number | null;
 };
 type ApiList = { ok: boolean; items: Video[]; page?: number; take?: number; total?: number };
 
-/* ========= badge ========= */
-function TrendingBadge({ rank, range }: { rank?: number | null; range: "1d" | "7d" | "30d" }) {
+/* ========= badges ========= */
+function TrendingBadge({ rank, range }: { rank?: number | null; range: Range }) {
   const label = rank ? `#${rank}` : "急上昇";
   const rangeText = range === "1d" ? "24時間" : range === "7d" ? "7日間" : "30日間";
   return (
@@ -61,11 +68,23 @@ function TrendingBadge({ rank, range }: { rank?: number | null; range: "1d" | "7
   );
 }
 
+function SupportBadge({ points, rank, range }: { points?: number | null; rank?: number | null; range: Range }) {
+  const rangeText = range === "1d" ? "24時間" : range === "7d" ? "7日間" : "30日間";
+  return (
+    <div className="inline-flex items-center gap-1 rounded-full bg-rose-600/20 text-rose-300 px-2 py-0.5 text-[11px]">
+      <span>💜</span>
+      <span className="font-medium">{fmtCount(points)} pt</span>
+      {rank ? <span className="opacity-70">/ #{rank}</span> : null}
+      <span className="opacity-70"> / {rangeText}</span>
+    </div>
+  );
+}
+
 /* ========= card ========= */
-function VideoCard({ v, range }: { v: Video; range: "1d" | "7d" | "30d" }) {
+function VideoCard({ v, range, sort }: { v: Video; range: Range; sort: SortMode }) {
   return (
     <Link
-      href={`/v/${v.id}`} // ★ ここを修正
+      href={`/v/${v.id}`}
       prefetch={false}
       className="group block rounded-2xl overflow-hidden bg-zinc-900 hover:bg-zinc-800 transition-colors"
     >
@@ -88,7 +107,11 @@ function VideoCard({ v, range }: { v: Video; range: "1d" | "7d" | "30d" }) {
 
       <div className="p-3 space-y-2">
         <div className="flex items-center justify-between gap-2">
-          <TrendingBadge rank={v.trendingRank ?? null} range={range} />
+          {sort === "support" ? (
+            <SupportBadge points={v.supportPoints ?? 0} rank={v.supportRank ?? null} range={range} />
+          ) : (
+            <TrendingBadge rank={v.trendingRank ?? null} range={range} />
+          )}
           <div className="text-[11px] text-zinc-400">{fmtDate(v.publishedAt)}</div>
         </div>
 
@@ -97,6 +120,10 @@ function VideoCard({ v, range }: { v: Video; range: "1d" | "7d" | "30d" }) {
         <div className="flex items-center gap-3 text-[12px] text-zinc-400">
           <span className="inline-flex items-center gap-1">👁 {fmtCount(v.views)}</span>
           <span className="inline-flex items-center gap-1">❤️ {fmtCount(v.likes)}</span>
+          {/* trending表示時も応援ptをサブ情報として出す */}
+          {sort === "trending" && (
+            <span className="inline-flex items-center gap-1">💜 {fmtCount(v.supportPoints)} pt</span>
+          )}
           {v.channelTitle && (
             <span className="ml-auto truncate max-w-[50%] text-zinc-300">🎤 {v.channelTitle}</span>
           )}
@@ -107,16 +134,13 @@ function VideoCard({ v, range }: { v: Video; range: "1d" | "7d" | "30d" }) {
 }
 
 /* ========= filter bar ========= */
-type ShortsMode = "all" | "exclude";
-
 function FilterBar({
-  range,
-  shorts,
-  onChange,
+  range, shorts, sort, onChange,
 }: {
-  range: "1d" | "7d" | "30d";
+  range: Range;
   shorts: ShortsMode;
-  onChange: (next: Partial<{ range: "1d" | "7d" | "30d"; shorts: ShortsMode }>) => void;
+  sort: SortMode;
+  onChange: (next: Partial<{ range: Range; shorts: ShortsMode; sort: SortMode }>) => void;
 }) {
   const rangeBtns = [
     { k: "1d", label: "24h" },
@@ -129,12 +153,17 @@ function FilterBar({
     { k: "exclude", label: "ショート除外" },
   ] as const;
 
+  const sortBtns = [
+    { k: "trending", label: "急上昇" },
+    { k: "support", label: "応援" },
+  ] as const;
+
   return (
     <div className="flex flex-wrap items-center gap-2">
       {rangeBtns.map(({ k, label }) => (
         <button
           key={k}
-          onClick={() => onChange({ range: k as any })}
+          onClick={() => onChange({ range: k as Range })}
           className={`px-3 py-1.5 rounded-full text-sm ${
             range === k ? "bg-violet-600 text-white" : "bg-zinc-800 text-white hover:bg-zinc-700"
           }`}
@@ -157,7 +186,21 @@ function FilterBar({
         ))}
       </div>
 
-      <span className="text-xs text-zinc-500 ml-auto">並び: 急上昇</span>
+      <div className="ml-2 inline-flex rounded-full bg-zinc-800 p-1">
+        {sortBtns.map(({ k, label }) => (
+          <button
+            key={k}
+            onClick={() => onChange({ sort: k as SortMode })}
+            className={`px-3 py-1.5 rounded-full text-sm ${
+              sort === k ? "bg-violet-600 text-white" : "text-white hover:bg-zinc-700"
+            }`}
+          >
+            {label}
+          </button>
+        ))}
+      </div>
+
+      <span className="text-xs text-zinc-500 ml-auto">並び: {sort === "support" ? "応援" : "急上昇"}</span>
     </div>
   );
 }
@@ -168,12 +211,14 @@ function TrendingPageInner() {
   const router = useRouter();
   const pathname = usePathname();
 
-  const initRange = (search.get("range") as "1d" | "7d" | "30d") || "1d";
+  const initRange = (search.get("range") as Range) || "1d";
   const rawShorts = (search.get("shorts") as ShortsMode | "only") || "all";
   const initShorts: ShortsMode = rawShorts === "exclude" ? "exclude" : "all";
+  const initSort = (search.get("sort") as SortMode) || "trending";
 
-  const [range, setRange] = useState<"1d" | "7d" | "30d">(initRange);
+  const [range, setRange] = useState<Range>(initRange);
   const [shorts, setShorts] = useState<ShortsMode>(initShorts);
+  const [sort, setSort] = useState<SortMode>(initSort);
 
   const [items, setItems] = useState<Video[]>([]);
   const [page, setPage] = useState(1);
@@ -182,11 +227,12 @@ function TrendingPageInner() {
   const sentinelRef = useRef<HTMLDivElement | null>(null);
 
   // 条件 → URL 同期
-  const syncQuery = (next?: Partial<{ range: "1d" | "7d" | "30d"; shorts: ShortsMode }>) => {
+  const syncQuery = (next?: Partial<{ range: Range; shorts: ShortsMode; sort: SortMode }>) => {
     const r = next?.range ?? range;
     const s = next?.shorts ?? shorts;
+    const so = next?.sort ?? sort;
     const qs = new URLSearchParams(search.toString());
-    qs.set("sort", "trending");
+    qs.set("sort", so);
     qs.set("range", r);
     qs.set("shorts", s);
     router.replace(`${pathname}?${qs.toString()}`, { scroll: false });
@@ -199,14 +245,14 @@ function TrendingPageInner() {
     setHasMore(true);
     fetchPage(1, true);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [range, shorts]);
+  }, [range, shorts, sort]);
 
   async function fetchPage(p: number, replace = false) {
     if (loading || (!replace && !hasMore)) return;
     setLoading(true);
     try {
       const qs = new URLSearchParams();
-      qs.set("sort", "trending");
+      qs.set("sort", sort);                 // ← 並び替え
       qs.set("range", range);
       qs.set("shorts", shorts);
       qs.set("page", String(p));
@@ -246,15 +292,17 @@ function TrendingPageInner() {
 
   // 初回：URL→state 同期（古い &shorts=only も all に寄せる）
   useEffect(() => {
-    const r = (search.get("range") as "1d" | "7d" | "30d") || "1d";
+    const r = (search.get("range") as Range) || "1d";
     const sRaw = (search.get("shorts") as ShortsMode | "only") || "all";
     const s: ShortsMode = sRaw === "exclude" ? "exclude" : "all";
+    const so = (search.get("sort") as SortMode) || "trending";
     setRange(r);
     setShorts(s);
+    setSort(so);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []); // 初回のみ
 
-  const listKey = `${range}-${shorts}`;
+  const listKey = `${range}-${shorts}-${sort}`;
 
   return (
     <main className="mx-auto max-w-7xl px-4 py-6 space-y-4">
@@ -265,9 +313,11 @@ function TrendingPageInner() {
       <FilterBar
         range={range}
         shorts={shorts}
+        sort={sort}
         onChange={(next) => {
           if (next.range) setRange(next.range);
           if (next.shorts) setShorts(next.shorts);
+          if (next.sort) setSort(next.sort);
           syncQuery(next);
         }}
       />
@@ -277,7 +327,7 @@ function TrendingPageInner() {
         className="grid gap-4 grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4"
       >
         {items.map((v) => (
-          <VideoCard key={v.id} v={v} range={range} />
+          <VideoCard key={v.id} v={v} range={range} sort={sort} />
         ))}
       </section>
 
