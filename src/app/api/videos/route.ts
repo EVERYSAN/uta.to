@@ -3,6 +3,10 @@ import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import type { Prisma } from "@prisma/client";
 
+// 念のため API レベルでもキャッシュ無効化
+export const dynamic = "force-dynamic";
+export const revalidate = 0;
+
 /** range クエリを Date にする（UTC） */
 function sinceFromRange(range: string | null): Date | undefined {
   const now = Date.now();
@@ -78,6 +82,46 @@ export async function GET(req: NextRequest) {
       likes: true,
     },
   });
+
+  // ▼ ここから追加：期間内の応援ポイントを集計して videos に合成する
+  // 期間境界
+  const now = Date.now();
+  const ms =
+    range === "1d" ? 24 * 60 * 60 * 1000 :
+    range === "7d" ? 7 * 24 * 60 * 60 * 1000 :
+    30 * 24 * 60 * 60 * 1000;
+  const since = new Date(now - ms);
+
+  const ids = videos.map(v => v.id);
+  let supportMap = new Map<string, number>();
+
+  if (ids.length > 0) {
+    const grouped = await prisma.supportEvent.groupBy({
+      by: ["videoId"],
+      where: {
+        videoId: { in: ids },
+        createdAt: { gte: since },
+      },
+      _sum: { points: true },
+    });
+    supportMap = new Map(grouped.map(g => [g.videoId, g._sum.points ?? 0]));
+  }
+
+  // 合成（supportPoints を付与）
+  let items = videos.map(v => ({
+    ...v,
+    supportPoints: supportMap.get(v.id) ?? 0,
+  }));
+
+  // 並び「応援」のときは集計値でクライアントに返す順を並べ替え
+  if (sort === "support") {
+    items.sort((a, b) => (b.supportPoints ?? 0) - (a.supportPoints ?? 0));
+    // お望みなら順位も付ける
+    items = items.map((v, i) => ({ ...v, supportRank: skip + i + 1 }));
+  }
+
+  return NextResponse.json({ ok: true, items, page, take });
+}
 
   // 24h 応援ポイントをまとめて集計 → マージ
   const ids = videos.map((v) => v.id);
