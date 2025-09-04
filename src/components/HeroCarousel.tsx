@@ -44,24 +44,15 @@ export default function HeroCarousel() {
 
   return (
     <section className="mb-6">
-      <div
-        className={[
-          "relative w-full overflow-hidden rounded-2xl border border-white/10 bg-neutral-900/40",
-          // 高さを薄く（PCでデカくなりすぎない）
-          "aspect-[21/9] md:aspect-[24/7] xl:aspect-[28/8]",
-          "max-h-[300px] md:max-h-[340px] xl:max-h-[360px]",
-        ].join(" ")}
-      >
-        <Link href={`/v/${active.id}`} className="block h-full w-full">
-          <img
-            src={active.thumbnailUrl ?? "/og.png"}
-            alt={active.title}
-            className="h-full w-full object-cover"
-            onError={(e) => {
-              (e.currentTarget as HTMLImageElement).src = "/og.png";
-            }}
-          />
-        </Link>
+      <div className="mx-auto w-full md:w-[500px] xl:w-[680px]">
+        <div className="relative h-[200px] md:h-[230px] xl:h-[260px] overflow-hidden rounded-2xl border border-white/10 bg-neutral-900/40">
+          <Link href={`/v/${active.id}`} className="block h-full w-full">
+            <img
+              src={active.thumbnailUrl ?? "/og.png"}
+              alt={active.title}
+              className="absolute inset-0 h-full w-full object-cover"
+            />
+          </Link>
 
         {/* --- モバイル: タイトルは左上に小さめで表示（チャンネル名は下のまま） --- */}
         <div className="pointer-events-none absolute left-2 top-2 sm:left-3 sm:top-3 md:hidden">
