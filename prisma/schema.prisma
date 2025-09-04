@@ -20,6 +20,19 @@ model Creator {
   @@unique([platform, platformUserId])
 }
 
+model SupportEvent {
+  id        String   @id @default(cuid())
+  videoId   String
+  video     Video    @relation(fields: [videoId], references: [id], onDelete: Cascade)
+  amount    Int      @default(1)
+  createdAt DateTime @default(now())
+  source    String?  // 任意: 由来などを入れたい場合
+  userId    String?  // 任意
+
+  @@index([videoId])
+  @@index([createdAt])
+}
+
 model Video {
   id               String   @id @default(cuid())
   platform         String
@@ -39,6 +52,7 @@ model Video {
   createdAt        DateTime @default(now())
   updatedAt        DateTime @updatedAt
   metrics          VideoMetric[]
+  supportEvents  SupportEvent[]
 
   // 逆方向 relation
   statsSnapshots   StatsSnapshot[]
@@ -72,6 +86,7 @@ model VideoMetric {
   @@unique([videoId, date], name: "videoId_date")
   @@index([date])
 }
+
 
 
 
