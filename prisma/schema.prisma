@@ -24,13 +24,17 @@ model SupportEvent {
   id        String   @id @default(cuid())
   videoId   String
   video     Video    @relation(fields: [videoId], references: [id], onDelete: Cascade)
-  amount    Int      @default(1)
-  createdAt DateTime @default(now())
-  source    String?  // 任意: 由来などを入れたい場合
-  userId    String?  // 任意
 
-  @@index([videoId])
-  @@index([createdAt])
+  // ★ コードが groupBy / sum している
+  amount    Int      @default(1)
+
+  // ★ /api/support が重複判定に使っている
+  ipHash    String?  // ハッシュなので可変無し、null許容でもOK
+
+  createdAt DateTime @default(now())
+
+  @@index([videoId, createdAt])
+  @@index([videoId, ipHash, createdAt])
 }
 
 model Video {
@@ -56,6 +60,9 @@ model Video {
 
   // 逆方向 relation
   statsSnapshots   StatsSnapshot[]
+  // ★ コード互換用（ranking API が select している）
+  supportPoints Int      @default(0)
+
 
   @@unique([platform, platformVideoId])
   @@index([publishedAt])
@@ -86,6 +93,7 @@ model VideoMetric {
   @@unique([videoId, date], name: "videoId_date")
   @@index([date])
 }
+
 
 
 
