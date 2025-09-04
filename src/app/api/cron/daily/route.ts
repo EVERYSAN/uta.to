@@ -1,6 +1,7 @@
 // src/app/api/cron/daily/route.ts
 import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
+import { Prisma } from "@prisma/client";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -186,24 +187,41 @@ export async function GET(req: Request) {
   const details = await getVideoDetails(usedKey || keys[0], videoIds);
 
   // Prisma に渡す形へマッピング
-  const rows = items.map((i) => {
-    const vid = i.id?.videoId!;
+  const rows: Prisma.VideoCreateManyInput[] = items
+  .map((i) => {
+    const vid = i.id?.videoId;
+    if (!vid) return null; // videoId が無いものは除外
+
     const sn = i.snippet;
     const det = details.get(vid);
     const durSec = parseISODurationToSeconds(det?.contentDetails?.duration);
 
+    const thumb =
+      sn?.thumbnails?.high?.url ??
+      sn?.thumbnails?.medium?.url ??
+      undefined;
+
     return {
+      // 必須
+      platform: "youtube",
+      platformVideoId: vid,
+
+      // ここからフィールド
       title: sn?.title ?? "(no title)",
-      channelTitle: sn?.channelTitle ?? null,
+      channelTitle: sn?.channelTitle ?? "",               // ← String(非NULL)には空文字で
       url: `https://www.youtube.com/watch?v=${vid}`,
-      thumbnailUrl: sn?.thumbnails?.high?.url ?? sn?.thumbnails?.medium?.url ?? null,
-      durationSec: durSec ?? null,
-      publishedAt: new Date(sn?.publishedAt ?? Date.now()),
-      views: toIntOrNull(det?.statistics?.viewCount),
-      likes: toIntOrNull(det?.statistics?.likeCount),
-      platform: "youtube" as const,
+
+      // Optional は undefined で安全に
+      thumbnailUrl: thumb,
+      durationSec: durSec ?? undefined,
+      publishedAt: sn?.publishedAt ? new Date(sn.publishedAt) : new Date(),
+      views: toIntOrNull(det?.statistics?.viewCount) ?? undefined,
+      likes: toIntOrNull(det?.statistics?.likeCount) ?? undefined,
+      // description など他に保存したいものがあればここで追加
     };
-  });
+  })
+  .filter((x): x is Prisma.VideoCreateManyInput => !!x);
+
 
   // 書き込み（重複で全体が落ちないように skipDuplicates）
   let inserted = 0;
