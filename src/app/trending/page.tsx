@@ -73,7 +73,7 @@ function SupportBadge({ points, rank, range }: { points?: number | null; rank?: 
   const rangeText = range === "1d" ? "24時間" : range === "7d" ? "7日間" : "30日間";
   return (
     <div className="inline-flex items-center gap-1 rounded-full bg-rose-600/20 text-rose-300 px-2 py-0.5 text-[11px]">
-      <span>💜</span>
+      <span>📣</span>
       <span className="font-medium">{fmtCount(points)} pt</span>
       {rank ? <span className="opacity-70">/ #{rank}</span> : null}
       <span className="opacity-70"> / {rangeText}</span>
@@ -123,7 +123,7 @@ function VideoCard({ v, range, sort }: { v: Video; range: Range; sort: SortMode 
           <span className="inline-flex items-center gap-1">❤️ {fmtCount(v.likes)}</span>
           {/* trending表示時も応援ptをサブ情報として出す */}
           {sort === "trending" && (
-            <span className="inline-flex items-center gap-1">💜 {fmtCount(v.supportPoints)} pt</span>
+            <span className="inline-flex items-center gap-1">📣 {fmtCount(v.supportPoints)} pt</span>
           )}
           {v.channelTitle && (
             <span className="ml-auto truncate max-w-[50%] text-zinc-300">🎤 {v.channelTitle}</span>
@@ -308,7 +308,6 @@ function TrendingPageInner() {
   return (
     <main className="mx-auto max-w-7xl px-4 py-6 space-y-4">
       <div className="flex items-center justify-between">
-        <h1 className="text-2xl md:text-3xl font-bold text-black">急上</h1>
       </div>
       
       <HeroCarousel />
