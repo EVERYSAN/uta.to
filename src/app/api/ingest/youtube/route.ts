@@ -19,7 +19,7 @@ type YtSearchItem = {
 
 type YtVideosItem = {
   id: string;
-  statistics?: { views?: string; likes?: string };
+  statistics?: { viewCount?: string; likeCount?: string };
   contentDetails?: { duration?: string }; // ISO8601
 };
 
@@ -167,11 +167,11 @@ export async function GET(req: Request) {
       const vs: YtVideosItem[] = j?.items ?? [];
 
       for (const v of vs) {
-        const views = v.statistics?.views
-          ? parseInt(v.statistics.views, 10)
+        const views = v.statistics?.viewCount
+          ? parseInt(v.statistics.viewCount, 10)
           : 0;
-        const likes = v.statistics?.likes
-          ? parseInt(v.statistics.likes, 10)
+        const likes = v.statistics?.likeCount
+          ? parseInt(v.statistics.likeCount, 10)
           : 0;
         const durationSec = iso8601DurationToSec(v.contentDetails?.duration);
 
@@ -203,9 +203,6 @@ export async function GET(req: Request) {
     updated,
   });
 }
-
-
-
 
 
 
