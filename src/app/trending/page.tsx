@@ -50,10 +50,8 @@ type Video = {
   likes?: number | null;
   trendingRank?: number | null;
   trendingScore?: number | null;
-  /** APIが返す期間内の応援ポイント（件数） */
-  supportPoints?: number | null;
-  /** （もしAPIが返すなら）応援順位 */
-  supportRank?: number | null;
+  supportPoints?: number | null; // 期間内応援件数
+  supportRank?: number | null;   // 応援順時の順位
 };
 type ApiList = { ok: boolean; items: Video[]; page?: number; take?: number; total?: number };
 
@@ -121,7 +119,7 @@ function VideoCard({ v, range, sort }: { v: Video; range: Range; sort: SortMode 
         <div className="flex items-center gap-3 text-[12px] text-zinc-400">
           <span className="inline-flex items-center gap-1">👁 {fmtCount(v.views)}</span>
           <span className="inline-flex items-center gap-1">❤️ {fmtCount(v.likes)}</span>
-          {/* 急上昇のときもサブ情報で期間内の応援ptを表示 */}
+          {/* 急上昇表示中でもサブ情報として期間内応援ptを表示 */}
           {sort === "trending" && (
             <span className="inline-flex items-center gap-1">📣 {fmtCount(v.supportPoints)} pt</span>
           )}
@@ -254,19 +252,19 @@ function TrendingPageInner() {
     setLoading(true);
     try {
       const qs = new URLSearchParams();
-      qs.set("sort", sort);                 // ← 並び替え（trending/support）
-      qs.set("range", range);               // ← 24h/7d/30d を常に付与
-      qs.set("shorts", shorts);             // ← ショート除外対応
+      qs.set("sort", sort);
+      qs.set("range", range);
+      qs.set("shorts", shorts);
       qs.set("page", String(p));
       qs.set("take", "24");
-      qs.set("ts", String(Date.now()));    // ← 追加: 毎回URLをユニークにして確実に最新を取る
+      qs.set("ts", String(Date.now())); // キャッシュ完全バイパス
 
       const res = await fetch(`/api/videos?${qs.toString()}`, { cache: "no-store" });
       const json: ApiList = await res.json();
       const rowsRaw = json?.items ?? [];
-      // ここを追加（将来のキー揺れ対策）
       const rows = rowsRaw.map((v: any) => ({
         ...v,
+        // 念のためキー揺れ吸収
         supportPoints: v.supportPoints ?? v.support24h ?? v.support ?? 0,
       }));
       setItems((prev) => (replace ? rows : [...prev, ...rows]));
@@ -277,25 +275,27 @@ function TrendingPageInner() {
       setLoading(false);
     }
   }
+
   // ✅ 応援更新の通知を受け取ったらリストをリフレッシュ
   useEffect(() => {
     const reload = () => {
       setItems([]);
       setPage(1);
       setHasMore(true);
-      fetchPage(1, true); // ← 1ページ目を取り直し
+      fetchPage(1, true);
+      // router.refresh(); // サーバー側に Server Component がいる場合の保険。必要なら有効化。
     };
-  
+
     // 画面にフォーカスが戻ってきたら取り直し（戻る対策）
     const onFocus = () => reload();
     window.addEventListener("focus", onFocus);
-  
+
     // localStorage 経由の通知
     const onStorage = (e: StorageEvent) => {
       if (e.key === "support:lastUpdated") reload();
     };
     window.addEventListener("storage", onStorage);
-  
+
     // BroadcastChannel 経由の通知
     let bc: BroadcastChannel | null = null;
     try {
@@ -303,7 +303,7 @@ function TrendingPageInner() {
       bc = new BroadcastChannel("support");
       bc.onmessage = () => reload();
     } catch {}
-  
+
     return () => {
       window.removeEventListener("focus", onFocus);
       window.removeEventListener("storage", onStorage);
@@ -331,28 +331,6 @@ function TrendingPageInner() {
     return () => ob.disconnect();
   }, [page, loading, hasMore]);
 
-  // 追加: ページに戻ってきたら 1 ページ目を取り直す
-  useEffect(() => {
-    const refresh = () => fetchPage(1, true);
-  
-    const onFocus = () => refresh();
-    const onVisible = () => {
-      if (document.visibilityState === "visible") refresh();
-    };
-    const onPageShow = () => refresh(); // BFCacheからの復帰も拾う
-  
-    window.addEventListener("focus", onFocus);
-    document.addEventListener("visibilitychange", onVisible);
-    window.addEventListener("pageshow", onPageShow);
-  
-    return () => {
-      window.removeEventListener("focus", onFocus);
-      document.removeEventListener("visibilitychange", onVisible);
-      window.removeEventListener("pageshow", onPageShow);
-    };
-    // range / shorts / sort が変わった時の条件も考慮
-  }, [range, shorts, sort]);
-
   // 初回：URL→state 同期（古い &shorts=only も all に寄せる）
   useEffect(() => {
     const r = (search.get("range") as Range) || "1d";
@@ -370,9 +348,9 @@ function TrendingPageInner() {
   return (
     <main className="mx-auto max-w-7xl px-4 py-6 space-y-4">
       <div className="flex items-center justify-between" />
-      
+
       <HeroCarousel />
-      
+
       <FilterBar
         range={range}
         shorts={shorts}
