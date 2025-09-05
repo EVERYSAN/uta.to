@@ -3,7 +3,11 @@ import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { createHash } from "crypto";
 
+// どのファイルも先頭付近に追加
 export const dynamic = "force-dynamic";
+export const revalidate = 0;
+export const runtime = "nodejs";
+
 
 /** ユーザーのグローバル IP をできる限り取得（Vercel/Proxy 対応） */
 function getClientIp(req: Request): string {
