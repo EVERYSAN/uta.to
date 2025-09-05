@@ -57,6 +57,7 @@ model Video {
   updatedAt        DateTime @updatedAt
   metrics          VideoMetric[]
   supportEvents  SupportEvent[]
+  supportCount     Int      @default(0) // ✅ 累計応援ポイント（即時反映用）
 
   // 逆方向 relation
   statsSnapshots   StatsSnapshot[]
@@ -93,6 +94,7 @@ model VideoMetric {
   @@unique([videoId, date], name: "videoId_date")
   @@index([date])
 }
+
 
 
 
