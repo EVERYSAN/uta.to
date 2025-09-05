@@ -204,7 +204,6 @@ function FilterBar({
   );
 }
 
-
 /* ========= main ========= */
 function TrendingPageInner() {
   const search = useSearchParams();
@@ -283,20 +282,20 @@ function TrendingPageInner() {
       setPage(1);
       setHasMore(true);
       fetchPage(1, true);
-      // router.refresh(); // サーバー側に Server Component がいる場合の保険。必要なら有効化。
+      // router.refresh(); // 必要なら有効化
     };
 
-    // 画面にフォーカスが戻ってきたら取り直し（戻る対策）
+    // 画面にフォーカスが戻ったら取り直し（戻る対策）
     const onFocus = () => reload();
     window.addEventListener("focus", onFocus);
 
-    // localStorage 経由の通知
+    // localStorage 通知
     const onStorage = (e: StorageEvent) => {
       if (e.key === "support:lastUpdated") reload();
     };
     window.addEventListener("storage", onStorage);
 
-    // BroadcastChannel 経由の通知
+    // BroadcastChannel 通知
     let bc: BroadcastChannel | null = null;
     try {
       // eslint-disable-next-line no-undef
@@ -331,7 +330,7 @@ function TrendingPageInner() {
     return () => ob.disconnect();
   }, [page, loading, hasMore]);
 
-  // 初回：URL→state 同期（古い &shorts=only も all に寄せる）
+  // 初回：URL→state 同期
   useEffect(() => {
     const r = (search.get("range") as Range) || "1d";
     const sRaw = (search.get("shorts") as ShortsMode | "only") || "all";
