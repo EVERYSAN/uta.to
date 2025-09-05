@@ -2,6 +2,12 @@
 import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 
+// どのファイルも先頭付近に追加
+export const dynamic = "force-dynamic";
+export const revalidate = 0;
+export const runtime = "nodejs";
+
+
 export const runtime = "nodejs"; // Prisma は Node で
 
 type Range = "24h" | "7d" | "30d";
