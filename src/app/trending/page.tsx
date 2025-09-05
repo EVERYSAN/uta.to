@@ -259,6 +259,7 @@ function TrendingPageInner() {
       qs.set("shorts", shorts);             // ← ショート除外対応
       qs.set("page", String(p));
       qs.set("take", "24");
+      qs.set("ts", String(Date.now()));    // ← 追加: 毎回URLをユニークにして確実に最新を取る
 
       const res = await fetch(`/api/videos?${qs.toString()}`, { cache: "no-store" });
       const json: ApiList = await res.json();
