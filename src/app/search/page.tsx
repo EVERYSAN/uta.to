@@ -1,12 +1,13 @@
+// src/app/search/page.tsx
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { useRouter, useSearchParams } from "next/navigation";
+import { useRouter } from "next/navigation";
 import Link from "next/link";
 
 type Item = {
   id: string;
-  platform: "youtube" | string;
+  platform: string;
   platformVideoId: string;
   title: string;
   channelTitle: string;
@@ -16,18 +17,26 @@ type Item = {
   publishedAt?: string | Date | null;
   views?: number;
   likes?: number;
-  supportPoints?: number;
+  supportPoints?: number; // API が付与
 };
 
 export default function SearchPage() {
-  const sp = useSearchParams();
   const router = useRouter();
 
-  // URLクエリと同期
-  const [q, setQ] = useState(sp.get("q") ?? "");
-  const [range, setRange] = useState(sp.get("range") ?? "1d");
-  const [shorts, setShorts] = useState(sp.get("shorts") ?? "all");
-  const [sort, setSort] = useState(sp.get("sort") ?? "hot");
+  // --- URLクエリ ←→ 状態（初期のみ location から読む） ---
+  const [q, setQ] = useState("");
+  const [range, setRange] = useState<"1d" | "7d" | "30d">("1d");
+  const [shorts, setShorts] = useState<"all" | "exclude" | "only">("all");
+  const [sort, setSort] = useState<"hot" | "new" | "support">("hot");
+
+  useEffect(() => {
+    const s = new URLSearchParams(window.location.search);
+    setQ(s.get("q") ?? "");
+    setRange((s.get("range") as any) ?? "1d");
+    setShorts((s.get("shorts") as any) ?? "all");
+    setSort((s.get("sort") as any) ?? "hot");
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const [items, setItems] = useState<Item[]>([]);
   const [page, setPage] = useState(1);
@@ -54,24 +63,27 @@ export default function SearchPage() {
     router.replace(`/search?${p.toString()}`, { scroll: false });
   }, [q, range, shorts, sort, router]);
 
-  // 検索API呼び出し
-  const fetchPage = useCallback(async (reset = false) => {
-    abortRef.current?.abort();
-    const ac = new AbortController();
-    abortRef.current = ac;
+  // --- API 呼び出し ---
+  const fetchPage = useCallback(
+    async (reset = false) => {
+      abortRef.current?.abort();
+      const ac = new AbortController();
+      abortRef.current = ac;
 
-    const res = await fetch(`/api/search?${queryString}`, {
-      cache: "no-store",
-      signal: ac.signal,
-    });
-    const json = await res.json();
-    if (!json.ok) return;
+      const res = await fetch(`/api/search?${queryString}`, {
+        cache: "no-store",
+        signal: ac.signal,
+      });
+      const json = await res.json();
+      if (!json?.ok) return;
 
-    setItems(prev => reset ? json.items : [...prev, ...json.items]);
-    setHasMore(json.items.length >= 24);
-  }, [queryString]);
+      setItems((prev) => (reset ? json.items : [...prev, ...json.items]));
+      setHasMore(json.items.length >= 24);
+    },
+    [queryString]
+  );
 
-  // 初回＆条件変更
+  // 条件が変わったら 1 ページ目から取り直す
   useEffect(() => {
     setPage(1);
     fetchPage(true);
@@ -79,37 +91,56 @@ export default function SearchPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [q, range, shorts, sort]);
 
-  // 無限ロード
+  // ページ増分
   useEffect(() => {
     if (page === 1) return;
     fetchPage(false);
   }, [page, fetchPage]);
 
   return (
-    <div className="min-h-screen pb-[68px]"> {/* 下部タブ分の余白 */}
-      {/* PCのヘッダー風検索バー */}
+    <div className="min-h-screen pb-[68px]">
+      {/* PC：上部検索バー */}
       <div className="sticky top-0 z-20 hidden md:block bg-black/40 backdrop-blur border-b border-white/10">
         <div className="mx-auto max-w-6xl px-4 py-3 flex gap-3 items-center">
           <SearchBox value={q} onChange={setQ} onSubmit={() => setPage(1)} />
-          <Toolbar range={range} setRange={setRange} shorts={shorts} setShorts={setShorts} sort={sort} setSort={setSort} />
+          <Toolbar
+            range={range}
+            setRange={setRange}
+            shorts={shorts}
+            setShorts={setShorts}
+            sort={sort}
+            setSort={setSort}
+          />
         </div>
       </div>
 
-      {/* SPはページ上部に検索バー */}
+      {/* SP：上部に検索バー＋簡易ツールバー */}
       <div className="md:hidden px-4 pt-3 pb-2 sticky top-0 z-20 bg-black">
         <SearchBox value={q} onChange={setQ} onSubmit={() => setPage(1)} />
         <div className="mt-2">
-          <Toolbar compact range={range} setRange={setRange} shorts={shorts} setShorts={setShorts} sort={sort} setSort={setSort} />
+          <Toolbar
+            compact
+            range={range}
+            setRange={setRange}
+            shorts={shorts}
+            setShorts={setShorts}
+            sort={sort}
+            setSort={setSort}
+          />
         </div>
       </div>
 
-      {/* 結果 */}
+      {/* 結果グリッド */}
       <div className="mx-auto max-w-6xl px-4 py-4 grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-4">
-        {items.map(v => (
+        {items.map((v) => (
           <a key={v.id} href={v.url} target="_blank" rel="noreferrer" className="group">
             <div className="aspect-video overflow-hidden rounded-lg bg-neutral-900">
               {/* eslint-disable-next-line @next/next/no-img-element */}
-              <img src={v.thumbnailUrl ?? ""} alt="" className="w-full h-full object-cover group-hover:opacity-90" />
+              <img
+                src={v.thumbnailUrl ?? ""}
+                alt=""
+                className="w-full h-full object-cover group-hover:opacity-90"
+              />
             </div>
             <div className="mt-2 text-sm leading-tight line-clamp-2">{v.title}</div>
             <div className="text-xs text-neutral-400">{v.channelTitle}</div>
@@ -124,7 +155,7 @@ export default function SearchPage() {
       {hasMore && (
         <div className="py-6 text-center">
           <button
-            onClick={() => setPage(p => p + 1)}
+            onClick={() => setPage((p) => p + 1)}
             className="px-4 py-2 rounded-lg bg-white/10 hover:bg-white/20"
           >
             さらに読み込み
@@ -132,18 +163,27 @@ export default function SearchPage() {
         </div>
       )}
 
-      {/* モバイル下部タブ */}
+      {/* SPフッタータブ（ホーム/検索） */}
       <MobileTabBar />
     </div>
   );
 }
 
 function SearchBox({
-  value, onChange, onSubmit,
-}: { value: string; onChange: (v: string) => void; onSubmit: () => void }) {
+  value,
+  onChange,
+  onSubmit,
+}: {
+  value: string;
+  onChange: (v: string) => void;
+  onSubmit: () => void;
+}) {
   return (
     <form
-      onSubmit={(e) => { e.preventDefault(); onSubmit(); }}
+      onSubmit={(e) => {
+        e.preventDefault();
+        onSubmit();
+      }}
       className="flex-1 flex gap-2"
     >
       <input
@@ -158,25 +198,40 @@ function SearchBox({
 }
 
 function Toolbar({
-  range, setRange, shorts, setShorts, sort, setSort, compact,
+  range,
+  setRange,
+  shorts,
+  setShorts,
+  sort,
+  setSort,
+  compact,
 }: {
-  range: string; setRange: (v: string) => void;
-  shorts: string; setShorts: (v: string) => void;
-  sort: string; setSort: (v: string) => void;
+  range: string;
+  setRange: (v: any) => void;
+  shorts: string;
+  setShorts: (v: any) => void;
+  sort: string;
+  setSort: (v: any) => void;
   compact?: boolean;
 }) {
   const btn = "px-3 py-1.5 rounded-lg bg-white/10 hover:bg-white/20 text-sm";
   const wrap = compact ? "flex gap-2 flex-wrap" : "flex gap-2 items-center";
   return (
     <div className={wrap}>
-      <select value={range} onChange={e => setRange(e.target.value)} className={btn}>
-        <option value="1d">24h</option><option value="7d">7日</option><option value="30d">30日</option>
+      <select value={range} onChange={(e) => setRange(e.target.value)} className={btn}>
+        <option value="1d">24h</option>
+        <option value="7d">7日</option>
+        <option value="30d">30日</option>
       </select>
-      <select value={shorts} onChange={e => setShorts(e.target.value)} className={btn}>
-        <option value="all">すべて</option><option value="exclude">ショート除外</option><option value="only">ショートのみ</option>
+      <select value={shorts} onChange={(e) => setShorts(e.target.value)} className={btn}>
+        <option value="all">すべて</option>
+        <option value="exclude">ショート除外</option>
+        <option value="only">ショートのみ</option>
       </select>
-      <select value={sort} onChange={e => setSort(e.target.value)} className={btn}>
-        <option value="hot">人気</option><option value="new">新着</option><option value="support">応援</option>
+      <select value={sort} onChange={(e) => setSort(e.target.value)} className={btn}>
+        <option value="hot">人気</option>
+        <option value="new">新着</option>
+        <option value="support">応援</option>
       </select>
     </div>
   );
