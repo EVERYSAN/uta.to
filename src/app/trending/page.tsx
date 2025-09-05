@@ -293,6 +293,28 @@ function TrendingPageInner() {
     return () => ob.disconnect();
   }, [page, loading, hasMore]);
 
+  // 追加: ページに戻ってきたら 1 ページ目を取り直す
+  useEffect(() => {
+    const refresh = () => fetchPage(1, true);
+  
+    const onFocus = () => refresh();
+    const onVisible = () => {
+      if (document.visibilityState === "visible") refresh();
+    };
+    const onPageShow = () => refresh(); // BFCacheからの復帰も拾う
+  
+    window.addEventListener("focus", onFocus);
+    document.addEventListener("visibilitychange", onVisible);
+    window.addEventListener("pageshow", onPageShow);
+  
+    return () => {
+      window.removeEventListener("focus", onFocus);
+      document.removeEventListener("visibilitychange", onVisible);
+      window.removeEventListener("pageshow", onPageShow);
+    };
+    // range / shorts / sort が変わった時の条件も考慮
+  }, [range, shorts, sort]);
+
   // 初回：URL→state 同期（古い &shorts=only も all に寄せる）
   useEffect(() => {
     const r = (search.get("range") as Range) || "1d";
