@@ -4,7 +4,7 @@
   "private": true,
   "scripts": {
     "dev": "next dev",
-    "build": "prisma generate && prisma migrate deploy && next build",
+    "build": "prisma generate && sh -c 'if [ \"$VERCEL_ENV\" = \"production\" ]; then prisma migrate deploy; else prisma db push; fi' && next build",
     "vercel-build": "prisma generate && next build",
     "start": "next start",
     "postinstall": "prisma generate",
