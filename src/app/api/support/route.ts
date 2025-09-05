@@ -1,3 +1,4 @@
+// src/app/api/support/route.ts
 import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 
@@ -14,19 +15,15 @@ export async function POST(req: Request) {
       );
     }
 
-    // 1トランザクション: SupportEvent 追加 + 累計 supportTotal を +1
+    // 1クリック = 1イベント追加 → 総件数を集計して返す
     const total = await prisma.$transaction(async (tx) => {
-      await tx.supportEvent.create({
-        data: { videoId }, // ← points は存在しないので渡さない
-      });
+      await tx.supportEvent.create({ data: { videoId } });
 
-      const upd = await tx.video.update({
-        where: { id: videoId },
-        data: { supportTotal: { increment: 1 } },
-        select: { supportTotal: true },
+      const agg = await tx.supportEvent.aggregate({
+        where: { videoId },
+        _count: { _all: true },
       });
-
-      return upd.supportTotal;
+      return agg._count._all ?? 0;
     });
 
     return NextResponse.json(
