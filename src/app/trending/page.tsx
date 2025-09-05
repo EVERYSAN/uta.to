@@ -263,7 +263,12 @@ function TrendingPageInner() {
 
       const res = await fetch(`/api/videos?${qs.toString()}`, { cache: "no-store" });
       const json: ApiList = await res.json();
-      const rows = json?.items ?? [];
+      const rowsRaw = json?.items ?? [];
+      // ここを追加（将来のキー揺れ対策）
+      const rows = rowsRaw.map((v: any) => ({
+        ...v,
+        supportPoints: v.supportPoints ?? v.support24h ?? v.support ?? 0,
+      }));
       setItems((prev) => (replace ? rows : [...prev, ...rows]));
       if (rows.length < 24) setHasMore(false);
     } catch {
