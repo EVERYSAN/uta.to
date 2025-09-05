@@ -37,6 +37,18 @@ export default function SupportButton({ videoId, initialPoints }: Props) {
         // その日の1回目を押した直後は“済み”に
         setDuplicated(true);
       }
+      // ✅ 応援成功時（setDuplicated(true) の後あたり）に追加
+    try {
+      localStorage.setItem("support:lastUpdated", String(Date.now()));
+      // BroadcastChannel が使える環境なら同時に通知（タブ間でも動く）
+      // eslint-disable-next-line no-undef
+      if (typeof BroadcastChannel !== "undefined") {
+        const ch = new BroadcastChannel("support");
+        ch.postMessage({ type: "updated" });
+        ch.close();
+      }
+    } catch {}
+
     } catch (e: any) {
       setErr(e?.message || 'internal_error');
     } finally {
