@@ -2,59 +2,42 @@
 import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 
-export const runtime = "nodejs";      // Prisma は edge で動かさない
-export const dynamic = "force-dynamic"; // キャッシュ無効
-export const revalidate = 0;
-
-function json(data: any, init: number = 200) {
-  return NextResponse.json(data, {
-    status: init,
-    headers: { "Cache-Control": "no-store" },
-  });
-}
-
-export async function GET(req: Request) {
-  const url = new URL(req.url);
-  const videoId = url.searchParams.get("videoId") ?? url.searchParams.get("id");
-  if (!videoId) return json({ ok: false, error: "missing_videoId" }, 400);
-
-  try {
-    const v = await prisma.video.findFirst({
-      where: { OR: [{ id: videoId }, { platformVideoId: videoId }] },
-      select: { supportPoints: true },
-    });
-    if (!v) return json({ ok: false, error: "not_found" }, 404);
-    return json({ ok: true, points: v.supportPoints ?? 0 });
-  } catch (e: any) {
-    return json({ ok: false, error: "internal_error", detail: e?.message }, 500);
-  }
-}
+export const dynamic = "force-dynamic";
 
 export async function POST(req: Request) {
   try {
-    const body = await req.json().catch(() => null);
-    const videoId = body?.videoId ?? body?.id;
-    if (!videoId) return json({ ok: false, error: "missing_videoId" }, 400);
+    const { videoId, points = 1 } = await req.json();
 
-    // id / platformVideoId どちらでもヒットするように
-    const target = await prisma.video.findFirst({
-      where: { OR: [{ id: videoId }, { platformVideoId: videoId }] },
-      select: { id: true },
+    if (!videoId || typeof videoId !== "string") {
+      return NextResponse.json({ ok: false, error: "INVALID_VIDEO_ID" }, { status: 400 });
+    }
+    const inc = Number(points) || 1;
+
+    // 1トランザクションで SupportEvent 作成 + 累計を加算
+    const total = await prisma.$transaction(async (tx) => {
+      await tx.supportEvent.create({
+        data: { videoId, points: inc }, // points列がない場合は 1 固定でもOK
+      });
+      const upd = await tx.video.update({
+        where: { id: videoId },
+        data: { supportTotal: { increment: inc } }, // schemaで Int default 0 を想定
+        select: { supportTotal: true },
+      });
+      return upd.supportTotal;
     });
-    if (!target) return json({ ok: false, error: "not_found" }, 404);
 
-    // 応援ポイントを +1
-    const updated = await prisma.video.update({
-      where: { id: target.id },
-      data: { supportPoints: { increment: 1 } },
-      select: { supportPoints: true },
+    // 即時リフレッシュ用のヒントヘッダ（クライアントで使うなら）
+    const headers = new Headers({
+      "Cache-Control": "no-store",
+      "x-support-updated": "1",
     });
 
-    // もしログ用テーブルが存在しない構成でも落ちないように完全に無視
-    // try { await prisma.supportLog.create({ data: { videoId: target.id } }); } catch {}
-
-    return json({ ok: true, points: updated.supportPoints ?? 0 });
+    return NextResponse.json(
+      { ok: true, videoId, total, at: new Date().toISOString() },
+      { headers }
+    );
   } catch (e: any) {
-    return json({ ok: false, error: "internal_error", detail: e?.message }, 500);
+    console.error("[support][POST] error", e);
+    return NextResponse.json({ ok: false, error: "INTERNAL_ERROR" }, { status: 500 });
   }
 }
