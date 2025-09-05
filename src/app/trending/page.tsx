@@ -272,6 +272,39 @@ function TrendingPageInner() {
       setLoading(false);
     }
   }
+  // ✅ 応援更新の通知を受け取ったらリストをリフレッシュ
+  useEffect(() => {
+    const reload = () => {
+      setItems([]);
+      setPage(1);
+      setHasMore(true);
+      fetchPage(1, true); // ← 1ページ目を取り直し
+    };
+  
+    // 画面にフォーカスが戻ってきたら取り直し（戻る対策）
+    const onFocus = () => reload();
+    window.addEventListener("focus", onFocus);
+  
+    // localStorage 経由の通知
+    const onStorage = (e: StorageEvent) => {
+      if (e.key === "support:lastUpdated") reload();
+    };
+    window.addEventListener("storage", onStorage);
+  
+    // BroadcastChannel 経由の通知
+    let bc: BroadcastChannel | null = null;
+    try {
+      // eslint-disable-next-line no-undef
+      bc = new BroadcastChannel("support");
+      bc.onmessage = () => reload();
+    } catch {}
+  
+    return () => {
+      window.removeEventListener("focus", onFocus);
+      window.removeEventListener("storage", onStorage);
+      try { bc?.close(); } catch {}
+    };
+  }, [range, shorts, sort]);
 
   // 無限スクロール
   useEffect(() => {
