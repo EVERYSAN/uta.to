@@ -1,0 +1,23 @@
+name: Staging Cron (hit /api/cron/daily)
+
+on:
+  schedule:
+    # UTCで動きます。例: 毎日 19:00 UTC = 翌日 04:00 JST
+    - cron: "0 19 * * *"
+  workflow_dispatch: {}  # 手動実行ボタン
+
+jobs:
+  call-staging-cron:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Hit staging daily cron
+        env:
+          # ← あなたの staging ブランチの固定URLに置き換え
+          STAGING_URL: "https://uta-to-git-staging-evies-projects-8cabdc74.vercel.app/"
+          CRON_SECRET: ${{ secrets.CRON_SECRET_STAGING }}
+        run: |
+          set -e
+          # 失敗を検知するため --fail を必ず付ける
+          curl --silent --show-error --fail \
+            "$STAGING_URL/api/cron/daily?secret=$CRON_SECRET"
+          echo "staging cron called successfully"
