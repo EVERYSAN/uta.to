@@ -1,278 +1,261 @@
 // src/app/api/cron/daily/route.ts
-import { NextResponse } from "next/server";
+import { NextResponse, NextRequest } from "next/server";
+import { revalidatePath } from "next/cache";
 import { prisma } from "@/lib/prisma";
-import type { Prisma } from "@prisma/client";
-import { revalidateTag } from "next/cache";
 
-// ---- Next.js 実行設定（SSG で実行されないように）----
-export const runtime = "nodejs";
+// ─────────────────────────────────────────────────────────────
+// 重要フラグ：ビルド時の静的化を禁止（request.url を読んでも安全）
+// ─────────────────────────────────────────────────────────────
 export const dynamic = "force-dynamic";
+export const runtime = "nodejs";
 
-// ---- 設定値 ----
-const QUERY = "歌ってみた";
-const MAX_PAGES = 5;
-const DEFAULT_LOOKBACK_HOURS = 72;
+// 認可：Vercel Cron or secret or Authorization: Bearer
+function authorize(req: NextRequest) {
+  const headerCron = req.headers.get("x-vercel-cron");
+  if (headerCron) return true;
 
-// 複数キーをカンマ区切りで与えられる
-function getApiKeys(): string[] {
-  const keys =
-    process.env.YOUTUBE_API_KEYS ??
-    process.env.YOUTUBE_API_KEY ??
-    "";
-  return keys
-    .split(",")
-    .map((s) => s.trim())
-    .filter(Boolean);
-}
-
-function iso(d: Date | string | number) {
-  return new Date(d).toISOString();
-}
-
-// --- 認可チェック（名称変更で衝突回避）---
-function ensureCronAuth(req: Request): { ok: boolean; via: string } {
   const url = new URL(req.url);
-  const token = url.searchParams.get("token") ?? "";
-  const secret = process.env.CRON_SECRET ?? "";
-  const cronHdr = req.headers.get("x-vercel-cron");
-  const ua = req.headers.get("user-agent") ?? "";
+  const qsSecret = url.searchParams.get("secret");
+  const envSecret = process.env.CRON_SECRET;
+  if (qsSecret && envSecret && qsSecret === envSecret) return true;
 
-  if (cronHdr) return { ok: true, via: "x-vercel-cron" }; // Vercel Cron の自動実行
-  if (!secret) return { ok: true, via: "no-secret" };     // シークレット未設定なら許可（暫定）
-  if (token && token === secret) return { ok: true, via: "query-token" };
-  if (/vercel-cron/i.test(ua)) return { ok: true, via: "ua-fallback" };
-  return { ok: false, via: "mismatch" };
+  const auth = req.headers.get("authorization");
+  if (auth && envSecret && auth === `Bearer ${envSecret}`) return true;
+
+  return false;
 }
 
-// ISO8601期間 → 秒（PT#H#M#S の簡易パーサ）
-function parseISODurationToSeconds(dur?: string): number | undefined {
-  if (!dur) return undefined;
-  const m = /^PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?$/.exec(dur);
-  if (!m) return undefined;
-  const h = m[1] ? parseInt(m[1], 10) : 0;
-  const mn = m[2] ? parseInt(m[2], 10) : 0;
-  const s = m[3] ? parseInt(m[3], 10) : 0;
-  return h * 3600 + mn * 60 + s;
+// DBカラムの存在チェック（Quoted テーブル名に注意：Prisma は "Video" など大文字）
+async function columnExists(table: string, column: string) {
+  // information_schema は小文字で管理されるので、クオートされた識別子に合わせて検索
+  const rows = await prisma.$queryRaw<
+    Array<{ exists: boolean }>
+  >`SELECT EXISTS(
+       SELECT 1 FROM information_schema.columns 
+       WHERE table_schema = 'public' 
+         AND table_name = ${table}
+         AND column_name = ${column}
+     ) AS "exists"`;
+  return rows[0]?.exists === true;
 }
 
-async function fetchJson<T>(url: string) {
-  const r = await fetch(url, { next: { revalidate: 0 } });
-  if (!r.ok) {
-    const text = await r.text().catch(() => "");
-    throw new Error(`HTTP ${r.status} ${r.statusText} for ${url}\n${text}`);
+// 取り込み（任意）：環境変数があれば実行、無ければスキップ
+// 例：HARVEST_JSON_URL に {items:[{platformVideoId,title,channelTitle,url,thumbnailUrl,durationSec,publishedAt}]} を返すエンドポイントを渡す
+async function ingestNewVideosIfConfigured() {
+  const url = process.env.HARVEST_JSON_URL;
+  if (!url) return { ok: true, skipped: true, added: 0, updated: 0 };
+
+  try {
+    const res = await fetch(url, { cache: "no-store" });
+    if (!res.ok) {
+      return { ok: false, skipped: false, error: `fetch ${res.status}` };
+    }
+    const data = await res.json();
+    const items: any[] = Array.isArray(data?.items) ? data.items : [];
+
+    let added = 0;
+    let updated = 0;
+
+    // ベーシックな upsert。platform は youtube 固定（必要に応じて改造）
+    for (const it of items) {
+      const platformVideoId: string | undefined = it.platformVideoId ?? it.id;
+      if (!platformVideoId) continue;
+
+      const publishedAt =
+        it.publishedAt ? new Date(it.publishedAt) : new Date();
+
+      await prisma.video
+        .upsert({
+          where: { platform_platformVideoId: { platform: "youtube", platformVideoId } },
+          create: {
+            platform: "youtube",
+            platformVideoId,
+            title: it.title ?? "(no title)",
+            channelTitle: it.channelTitle ?? "(unknown)",
+            url: it.url ?? `https://www.youtube.com/watch?v=${platformVideoId}`,
+            thumbnailUrl: it.thumbnailUrl ?? null,
+            durationSec:
+              typeof it.durationSec === "number" ? it.durationSec : null,
+            publishedAt,
+            views: typeof it.views === "number" ? it.views : 0,
+            likes: typeof it.likes === "number" ? it.likes : 0,
+          },
+          update: {
+            title: it.title ?? undefined,
+            channelTitle: it.channelTitle ?? undefined,
+            url: it.url ?? undefined,
+            thumbnailUrl: it.thumbnailUrl ?? undefined,
+            durationSec:
+              typeof it.durationSec === "number" ? it.durationSec : undefined,
+            publishedAt,
+            views: typeof it.views === "number" ? it.views : undefined,
+            likes: typeof it.likes === "number" ? it.likes : undefined,
+          },
+          select: { id: true },
+        })
+        .then((r) => {
+          // upsert の結果から新規/更新は判定しにくいので軽く存在チェック
+          if (r) updated += 1;
+        })
+        .catch((e) => {
+          // 競合などは握りつぶして続行
+          console.error("upsert video error:", e);
+        });
+    }
+
+    // 新規件数をざっくり計るなら、items 長 - 更新数 だが、ここでは updated を総件数として返す
+    added = Math.max(0, items.length - updated);
+    return { ok: true, skipped: false, added, updated };
+  } catch (e: any) {
+    return { ok: false, skipped: false, error: String(e?.message ?? e) };
   }
-  return (await r.json()) as T;
 }
 
-// --- YouTube API 型 ---
-type YTSearchItem = {
-  id: { videoId?: string };
-  snippet: {
-    title: string;
-    channelTitle: string;
-    publishedAt: string;
-    thumbnails?: {
-      medium?: { url?: string };
-      high?: { url?: string };
-    };
-  };
-};
+// 応援の再集計：累計＋ 1d/7d/30d（該当カラムが無いなら自動スキップ）
+async function recomputeSupportCounters() {
+  const hasTotal = await columnExists("Video", "supporttotal"); // Postgres は列名小文字比較
+  const has1d = await columnExists("Video", "support1d");
+  const has7d = await columnExists("Video", "support7d");
+  const has30d = await columnExists("Video", "support30d");
 
-type YTVideosItem = {
-  id: string;
-  contentDetails?: { duration?: string };
-  statistics?: { viewCount?: string; likeCount?: string };
-};
-
-async function searchYoutubeSince(
-  key: string,
-  query: string,
-  publishedAfterISO: string,
-  maxPages: number
-) {
-  const items: YTSearchItem[] = [];
-  let pageToken = "";
-  for (let page = 0; page < maxPages; page++) {
-    const url = new URL("https://www.googleapis.com/youtube/v3/search");
-    url.searchParams.set("key", key);
-    url.searchParams.set("part", "snippet");
-    url.searchParams.set("type", "video");
-    url.searchParams.set("maxResults", "50");
-    url.searchParams.set("order", "date");
-    url.searchParams.set("q", query);
-    url.searchParams.set("publishedAfter", publishedAfterISO);
-    if (pageToken) url.searchParams.set("pageToken", pageToken);
-
-    const json = await fetchJson<any>(url.toString());
-    (json.items as any[] | undefined)?.forEach((i) => items.push(i));
-    pageToken = json.nextPageToken ?? "";
-    if (!pageToken) break;
-  }
-  return items;
-}
-
-async function getVideoDetails(key: string, ids: string[]) {
-  if (ids.length === 0) return new Map<string, YTVideosItem>();
-  const map = new Map<string, YTVideosItem>();
-  for (let i = 0; i < ids.length; i += 50) {
-    const chunk = ids.slice(i, i + 50);
-    const url = new URL("https://www.googleapis.com/youtube/v3/videos");
-    url.searchParams.set("key", key);
-    url.searchParams.set("part", "contentDetails,statistics");
-    url.searchParams.set("id", chunk.join(","));
-    const json = await fetchJson<any>(url.toString());
-    (json.items as any[] | undefined)?.forEach((it) => {
-      map.set(it.id, it);
+  // groupBy helper
+  const groupCount = async (since?: Date) => {
+    const where = since ? { createdAt: { gte: since } } : {};
+    const grouped = await prisma.supportEvent.groupBy({
+      by: ["videoId"],
+      where,
+      _count: { videoId: true }, // ← TypeScript 的にも OK（_all は orderBy に使えない）
+      orderBy: { _count: { videoId: "desc" } },
     });
+    // Map<videoId, count>
+    return new Map(grouped.map((g) => [g.videoId, g._count?.videoId ?? 0]));
+  };
+
+  const now = Date.now();
+  const d1 = new Date(now - 24 * 60 * 60 * 1000);
+  const d7 = new Date(now - 7 * 24 * 60 * 60 * 1000);
+  const d30 = new Date(now - 30 * 24 * 60 * 60 * 1000);
+
+  const totalMap = hasTotal ? await groupCount() : new Map<string, number>();
+  const m1 = has1d ? await groupCount(d1) : new Map<string, number>();
+  const m7 = has7d ? await groupCount(d7) : new Map<string, number>();
+  const m30 = has30d ? await groupCount(d30) : new Map<string, number>();
+
+  // 更新対象 videoId の集合
+  const ids = new Set<string>([
+    ...totalMap.keys(),
+    ...m1.keys(),
+    ...m7.keys(),
+    ...m30.keys(),
+  ]);
+  let updatedRows = 0;
+
+  // 大量更新になり得るので、トランザクション＋並列は控えめ
+  await prisma.$transaction(
+    async (tx) => {
+      for (const id of ids) {
+        const data: any = {};
+        if (hasTotal) data.supportTotal = totalMap.get(id) ?? 0;
+        if (has1d) data.support1d = m1.get(id) ?? 0;
+        if (has7d) data.support7d = m7.get(id) ?? 0;
+        if (has30d) data.support30d = m30.get(id) ?? 0;
+
+        try {
+          await tx.video.update({
+            where: { id },
+            data,
+            select: { id: true },
+          });
+          updatedRows++;
+        } catch (e) {
+          // 既に消えた videoId などはスキップ
+        }
+      }
+    },
+    { timeout: 60_000 }
+  );
+
+  return {
+    ok: true,
+    updatedRows,
+    columns: {
+      supportTotal: hasTotal,
+      support1d: has1d,
+      support7d: has7d,
+      support30d: has30d,
+    },
+  };
+}
+
+// 検索用テキストの同期（任意）：title + channelTitle を search_text に格納する等
+async function rebuildSearchTextIfExists() {
+  const hasSearch = await columnExists("Video", "search_text");
+  if (!hasSearch) return { ok: true, skipped: true };
+
+  // 適当な同義：COALESCE(title,'') || ' ' || COALESCE(channelTitle,'')
+  try {
+    // 全件更新は重いので、「空 or null だけ更新」に留める
+    await prisma.$executeRawUnsafe(`
+      UPDATE "Video"
+         SET "search_text" = TRIM(COALESCE("title",'') || ' ' || COALESCE("channelTitle",''))
+       WHERE "search_text" IS NULL OR "search_text" = '';
+    `);
+    return { ok: true, skipped: false };
+  } catch (e: any) {
+    return { ok: false, skipped: false, error: String(e?.message ?? e) };
   }
-  return map;
 }
 
-function toIntUndef(s?: string): number | undefined {
-  if (s == null) return undefined;
-  const n = parseInt(s, 10);
-  return Number.isFinite(n) ? n : undefined;
+// 必要ページの再検証（ISR/SSG を使っていなくても無害）
+async function revalidateAll() {
+  try {
+    revalidatePath("/");            // ホーム
+    revalidatePath("/trending");    // 急上昇
+    revalidatePath("/search");      // 検索
+    return { ok: true };
+  } catch (e: any) {
+    return { ok: false, error: String(e?.message ?? e) };
+  }
 }
 
-export async function GET(req: Request) {
-  // 認可（ensureCronAuth に変更）
-  const auth = ensureCronAuth(req);
-  if (!auth.ok) {
+export async function GET(req: NextRequest) {
+  if (!authorize(req)) {
     return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
   }
 
-  const url = new URL(req.url);
-  const debug = url.searchParams.get("debug") === "1";
-  const dryRun = url.searchParams.get("dry") === "1";
+  const startedAt = new Date().toISOString();
 
-  // どこから取りに行くか：DB の最新 publishedAt から少し巻き戻す。無ければ既定の lookback
-  const lookbackHours =
-    Number(url.searchParams.get("lookbackHours") ?? "") ||
-    Number(process.env.CRON_LOOKBACK_HOURS ?? "") ||
-    DEFAULT_LOOKBACK_HOURS;
+  // 1) 取り込み（任意：環境変数で有効化）
+  const ingestRes = await ingestNewVideosIfConfigured();
 
-  const latest = await prisma.video.findFirst({
-    select: { publishedAt: true },
-    orderBy: { publishedAt: "desc" },
-  });
+  // 2) 応援の再集計（累計＋レンジ）
+  const supportRes = await recomputeSupportCounters();
 
-  const sinceDate =
-    latest?.publishedAt
-      ? new Date(latest.publishedAt.getTime() - 60 * 60 * 1000) // 取りこぼし防止で -1h
-      : new Date(Date.now() - lookbackHours * 60 * 60 * 1000);
+  // 3) 検索用テキスト再構築（任意）
+  const searchRes = await rebuildSearchTextIfExists();
 
-  const sinceISO = iso(sinceDate);
+  // 4) ページ再検証
+  const revalRes = await revalidateAll();
 
-  // APIキーを順に試す
-  const keys = getApiKeys();
-  if (keys.length === 0) {
-    return NextResponse.json(
-      { ok: false, error: "no_youtube_api_key" },
-      { status: 500 }
-    );
-    }
+  const finishedAt = new Date().toISOString();
 
-  let items: YTSearchItem[] = [];
-  let usedKey = "";
-  let pagesTried = 0;
-
-  for (const key of keys) {
-    try {
-      items = await searchYoutubeSince(key, QUERY, sinceISO, MAX_PAGES);
-      usedKey = key.replace(/.(?=.{4})/g, "•"); // 末尾4桁以外マスク
-      pagesTried = MAX_PAGES;
-      break;
-    } catch {
-      usedKey = "(failed key hidden)";
-      pagesTried++;
-      continue;
-    }
-  }
-
-  // 取得ID一覧
-  const ids = items.map((i) => i.id?.videoId).filter(Boolean) as string[];
-
-  // 詳細を 50件ずつ取得
-  let detailMap = new Map<string, YTVideosItem>();
-  for (const key of keys) {
-    try {
-      detailMap = await getVideoDetails(key, ids);
-      break;
-    } catch {
-      continue;
-    }
-  }
-
-  // Prisma に渡す形へ
-  const rows: Prisma.VideoCreateManyInput[] = items
-    .map((i) => {
-      const vid = i.id?.videoId;
-      if (!vid) return null;
-
-      const sn = i.snippet;
-      const det = detailMap.get(vid);
-
-      const durSec = parseISODurationToSeconds(det?.contentDetails?.duration);
-      const thumb =
-        sn.thumbnails?.high?.url ??
-        sn.thumbnails?.medium?.url ??
-        undefined;
-
-      const data: Prisma.VideoCreateManyInput = {
-        platform: "youtube",
-        platformVideoId: vid,
-        title: sn.title,
-        channelTitle: sn.channelTitle,
-        url: `https://www.youtube.com/watch?v=${vid}`,
-        thumbnailUrl: thumb,             // undefined を許容
-        durationSec: durSec,             // undefined を許容
-        publishedAt: new Date(sn.publishedAt ?? Date.now()),
-        views: toIntUndef(det?.statistics?.viewCount),
-        likes: toIntUndef(det?.statistics?.likeCount),
-      };
-      return data;
-    })
-    .filter((x): x is Prisma.VideoCreateManyInput => x !== null);
-
-  let inserted = 0;
-  let skipped = 0;
-
-  if (!dryRun && rows.length > 0) {
-    const res = await prisma.video.createMany({
-      data: rows,
-      skipDuplicates: true,
-    });
-    inserted = res.count;
-    skipped = rows.length - inserted;
-  } else {
-    skipped = rows.length;
-  }
-
-  // ISR/キャッシュを明示的に更新（タグはあなたの実装に合わせて）
-  try {
-    revalidateTag("video:list");
-    revalidateTag("video:24h");
-  } catch {
-    // 失敗しても処理は続行
-  }
-
-  const resBody = {
-    ok: true,
-    meta: {
-      now: iso(Date.now()),
-      since: sinceISO,
-      query: QUERY,
-      pagesTried,
-      usedKey,
-      dryRun,
+  return NextResponse.json(
+    {
+      ok: true,
+      startedAt,
+      finishedAt,
+      steps: {
+        ingest: ingestRes,
+        recomputeSupport: supportRes,
+        rebuildSearch: searchRes,
+        revalidate: revalRes,
+      },
     },
-    counts: {
-      fetched: items.length,
-      inserted,
-      skipped,
-    },
-    ...(debug ? { sample: rows.slice(0, 3) } : {}),
-  };
-
-  return NextResponse.json(resBody, { status: 200 });
+    {
+      headers: {
+        // 念のためキャッシュさせない
+        "Cache-Control": "no-store",
+      },
+    }
+  );
 }
