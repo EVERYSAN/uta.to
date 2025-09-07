@@ -1,261 +1,271 @@
 // src/app/api/cron/daily/route.ts
-import { NextResponse, NextRequest } from "next/server";
-import { revalidatePath } from "next/cache";
+import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
+import { revalidatePath } from "next/cache";
 
-// ─────────────────────────────────────────────────────────────
-// 重要フラグ：ビルド時の静的化を禁止（request.url を読んでも安全）
-// ─────────────────────────────────────────────────────────────
 export const dynamic = "force-dynamic";
-export const runtime = "nodejs";
+export const revalidate = 0;
 
-// 認可：Vercel Cron or secret or Authorization: Bearer
-function authorize(req: NextRequest) {
-  const headerCron = req.headers.get("x-vercel-cron");
-  if (headerCron) return true;
+type Step<T extends object = {}> =
+  | ({ ok: true } & T)
+  | ({ ok: false; error: string });
 
+type Steps = {
+  ingest: Step<{ skipped: boolean; added: number; updated: number }>;
+  recomputeSupport: Step<{
+    totals: { updatedViaJoin: number; zeroFilled: number };
+    has: {
+      supportCount: boolean;
+      supportPoints: boolean;
+      support1d: boolean;
+      support7d: boolean;
+      support30d: boolean;
+    };
+    windows?: {
+      d1?: { updatedViaJoin: number; zeroFilled: number };
+      d7?: { updatedViaJoin: number; zeroFilled: number };
+      d30?: { updatedViaJoin: number; zeroFilled: number };
+    };
+  }>;
+  rebuildSearch: Step<{ skipped: boolean }>;
+  revalidate: Step<{}>;
+};
+
+type Result = {
+  ok: boolean;
+  env: "production" | "preview" | "development" | "unknown";
+  dryRun: boolean;
+  startedAt: string;
+  finishedAt?: string;
+  steps: Steps;
+};
+
+function ok<T extends object>(extra?: T) {
+  return ({ ok: true, ...(extra ?? {}) }) as const;
+}
+function err(message: string) {
+  return { ok: false as const, error: message };
+}
+
+function getSecretFrom(req: Request) {
+  const u = new URL(req.url);
+  const qs = u.searchParams.get("secret") ?? undefined;
+  const hdr =
+    req.headers.get("authorization")?.replace(/^Bearer\s+/i, "") ||
+    req.headers.get("x-cron-secret") ||
+    undefined;
+  return qs || hdr;
+}
+
+function assertAuthorized(req: Request) {
+  const want = process.env.CRON_SECRET;
+  if (!want) throw new Error("CRON_SECRET is not set");
+  const got = getSecretFrom(req);
+  if (got !== want) throw new Error("unauthorized");
+}
+
+const ENV =
+  (process.env.VERCEL_ENV as Result["env"]) ||
+  (process.env.NODE_ENV as Result["env"]) ||
+  "unknown";
+
+async function columnExists(table: string, column: string): Promise<boolean> {
+  // Prisma は大文字のテーブル名を "Video" のように **引用符付き** で作るので information_schema も同名です
+  const rows = await prisma.$queryRawUnsafe<
+    { exists: boolean }[]
+  >(
+    `
+    SELECT EXISTS (
+      SELECT 1
+      FROM information_schema.columns
+      WHERE table_schema = 'public'
+        AND table_name = $1
+        AND column_name = $2
+    ) AS exists
+  `,
+    table,
+    column
+  );
+  return !!rows?.[0]?.exists;
+}
+
+async function tableExists(table: string): Promise<boolean> {
+  const rows = await prisma.$queryRawUnsafe<{ exists: boolean }[]>(
+    `
+    SELECT EXISTS (
+      SELECT 1
+      FROM information_schema.tables
+      WHERE table_schema = 'public'
+        AND table_name = $1
+    ) AS exists
+  `,
+    table
+  );
+  return !!rows?.[0]?.exists;
+}
+
+export async function GET(req: Request) {
+  // 認証
+  try {
+    assertAuthorized(req);
+  } catch (e: any) {
+    return NextResponse.json({ ok: false, error: e?.message ?? "unauthorized" }, { status: 401 });
+  }
+
+  const startedAt = new Date();
   const url = new URL(req.url);
-  const qsSecret = url.searchParams.get("secret");
-  const envSecret = process.env.CRON_SECRET;
-  if (qsSecret && envSecret && qsSecret === envSecret) return true;
+  const dryRun = url.searchParams.get("dry") === "1";
 
-  const auth = req.headers.get("authorization");
-  if (auth && envSecret && auth === `Bearer ${envSecret}`) return true;
+  const steps: Steps = {
+    ingest: ok({ skipped: true, added: 0, updated: 0 }), // 将来の取り込み枠（今回はスキップ）
+    recomputeSupport: err("not-started"),
+    rebuildSearch: ok({ skipped: true }), // 検索用カラム/テーブルがなければスキップ
+    revalidate: err("not-started"),
+  };
 
-  return false;
-}
-
-// DBカラムの存在チェック（Quoted テーブル名に注意：Prisma は "Video" など大文字）
-async function columnExists(table: string, column: string) {
-  // information_schema は小文字で管理されるので、クオートされた識別子に合わせて検索
-  const rows = await prisma.$queryRaw<
-    Array<{ exists: boolean }>
-  >`SELECT EXISTS(
-       SELECT 1 FROM information_schema.columns 
-       WHERE table_schema = 'public' 
-         AND table_name = ${table}
-         AND column_name = ${column}
-     ) AS "exists"`;
-  return rows[0]?.exists === true;
-}
-
-// 取り込み（任意）：環境変数があれば実行、無ければスキップ
-// 例：HARVEST_JSON_URL に {items:[{platformVideoId,title,channelTitle,url,thumbnailUrl,durationSec,publishedAt}]} を返すエンドポイントを渡す
-async function ingestNewVideosIfConfigured() {
-  const url = process.env.HARVEST_JSON_URL;
-  if (!url) return { ok: true, skipped: true, added: 0, updated: 0 };
-
+  // ---------------------------
+  // 1) Support 再計算（合計）
+  // ---------------------------
   try {
-    const res = await fetch(url, { cache: "no-store" });
-    if (!res.ok) {
-      return { ok: false, skipped: false, error: `fetch ${res.status}` };
-    }
-    const data = await res.json();
-    const items: any[] = Array.isArray(data?.items) ? data.items : [];
+    const hasSupportCount = await columnExists("Video", "supportCount");
+    const hasSupportPoints = await columnExists("Video", "supportPoints");
 
-    let added = 0;
-    let updated = 0;
+    // 期間別（存在すれば更新）
+    const has1d = await columnExists("Video", "support1d");
+    const has7d = await columnExists("Video", "support7d");
+    const has30d = await columnExists("Video", "support30d");
 
-    // ベーシックな upsert。platform は youtube 固定（必要に応じて改造）
-    for (const it of items) {
-      const platformVideoId: string | undefined = it.platformVideoId ?? it.id;
-      if (!platformVideoId) continue;
+    const hasAnyTotal = hasSupportCount || hasSupportPoints;
 
-      const publishedAt =
-        it.publishedAt ? new Date(it.publishedAt) : new Date();
+    let updatedViaJoin = 0;
+    let zeroFilled = 0;
 
-      await prisma.video
-        .upsert({
-          where: { platform_platformVideoId: { platform: "youtube", platformVideoId } },
-          create: {
-            platform: "youtube",
-            platformVideoId,
-            title: it.title ?? "(no title)",
-            channelTitle: it.channelTitle ?? "(unknown)",
-            url: it.url ?? `https://www.youtube.com/watch?v=${platformVideoId}`,
-            thumbnailUrl: it.thumbnailUrl ?? null,
-            durationSec:
-              typeof it.durationSec === "number" ? it.durationSec : null,
-            publishedAt,
-            views: typeof it.views === "number" ? it.views : 0,
-            likes: typeof it.likes === "number" ? it.likes : 0,
-          },
-          update: {
-            title: it.title ?? undefined,
-            channelTitle: it.channelTitle ?? undefined,
-            url: it.url ?? undefined,
-            thumbnailUrl: it.thumbnailUrl ?? undefined,
-            durationSec:
-              typeof it.durationSec === "number" ? it.durationSec : undefined,
-            publishedAt,
-            views: typeof it.views === "number" ? it.views : undefined,
-            likes: typeof it.likes === "number" ? it.likes : undefined,
-          },
-          select: { id: true },
-        })
-        .then((r) => {
-          // upsert の結果から新規/更新は判定しにくいので軽く存在チェック
-          if (r) updated += 1;
-        })
-        .catch((e) => {
-          // 競合などは握りつぶして続行
-          console.error("upsert video error:", e);
-        });
+    if (hasAnyTotal && !dryRun) {
+      // SupportEvent 全体件数 → Video.supportCount / supportPoints
+      updatedViaJoin = await prisma.$executeRawUnsafe<number>(`
+        WITH counts AS (
+          SELECT "videoId", COUNT(*)::int AS cnt
+          FROM "SupportEvent"
+          GROUP BY "videoId"
+        )
+        UPDATE "Video" AS v
+        SET
+          ${hasSupportCount ? `"supportCount" = c.cnt` : `"id" = v.id"`},
+          ${hasSupportPoints ? `"supportPoints" = c.cnt` : `"id" = v.id" /* no-op */`}
+        FROM counts c
+        WHERE v.id = c."videoId"
+      `);
+
+      zeroFilled = await prisma.$executeRawUnsafe<number>(`
+        UPDATE "Video" AS v
+        SET
+          ${hasSupportCount ? `"supportCount" = 0` : `"id" = v.id"`},
+          ${hasSupportPoints ? `"supportPoints" = 0` : `"id" = v.id" /* no-op */"}
+        WHERE NOT EXISTS (
+          SELECT 1 FROM "SupportEvent" se WHERE se."videoId" = v.id
+        )
+      `);
     }
 
-    // 新規件数をざっくり計るなら、items 長 - 更新数 だが、ここでは updated を総件数として返す
-    added = Math.max(0, items.length - updated);
-    return { ok: true, skipped: false, added, updated };
-  } catch (e: any) {
-    return { ok: false, skipped: false, error: String(e?.message ?? e) };
-  }
-}
+    // 期間別ウィンドウ（列が存在する時だけ）
+    const windows: Steps["recomputeSupport"]["windows"] = {};
+    async function updateWindow(col: "support1d" | "support7d" | "support30d", intervalSql: string) {
+      if (!(await columnExists("Video", col))) return { updatedViaJoin: 0, zeroFilled: 0 };
 
-// 応援の再集計：累計＋ 1d/7d/30d（該当カラムが無いなら自動スキップ）
-async function recomputeSupportCounters() {
-  const hasTotal = await columnExists("Video", "supporttotal"); // Postgres は列名小文字比較
-  const has1d = await columnExists("Video", "support1d");
-  const has7d = await columnExists("Video", "support7d");
-  const has30d = await columnExists("Video", "support30d");
+      if (dryRun) return { updatedViaJoin: 0, zeroFilled: 0 };
 
-  // groupBy helper
-  const groupCount = async (since?: Date) => {
-    const where = since ? { createdAt: { gte: since } } : {};
-    const grouped = await prisma.supportEvent.groupBy({
-      by: ["videoId"],
-      where,
-      _count: { videoId: true }, // ← TypeScript 的にも OK（_all は orderBy に使えない）
-      orderBy: { _count: { videoId: "desc" } },
+      const u = await prisma.$executeRawUnsafe<number>(`
+        WITH counts AS (
+          SELECT "videoId", COUNT(*)::int AS cnt
+          FROM "SupportEvent"
+          WHERE "createdAt" >= NOW() - ${intervalSql}
+          GROUP BY "videoId"
+        )
+        UPDATE "Video" AS v
+        SET "${col}" = c.cnt
+        FROM counts c
+        WHERE v.id = c."videoId"
+      `);
+
+      const z = await prisma.$executeRawUnsafe<number>(`
+        UPDATE "Video" AS v
+        SET "${col}" = 0
+        WHERE NOT EXISTS (
+          SELECT 1 FROM "SupportEvent" se
+          WHERE se."videoId" = v.id
+            AND se."createdAt" >= NOW() - ${intervalSql}
+        )
+      `);
+
+      return { updatedViaJoin: u, zeroFilled: z };
+    }
+
+    if (has1d) windows.d1 = await updateWindow("support1d", `INTERVAL '1 day'`);
+    if (has7d) windows.d7 = await updateWindow("support7d", `INTERVAL '7 days'`);
+    if (has30d) windows.d30 = await updateWindow("support30d", `INTERVAL '30 days'`);
+
+    steps.recomputeSupport = ok({
+      totals: { updatedViaJoin, zeroFilled },
+      has: {
+        supportCount: hasSupportCount,
+        supportPoints: hasSupportPoints,
+        support1d: has1d,
+        support7d: has7d,
+        support30d: has30d,
+      },
+      windows,
     });
-    // Map<videoId, count>
-    return new Map(grouped.map((g) => [g.videoId, g._count?.videoId ?? 0]));
-  };
-
-  const now = Date.now();
-  const d1 = new Date(now - 24 * 60 * 60 * 1000);
-  const d7 = new Date(now - 7 * 24 * 60 * 60 * 1000);
-  const d30 = new Date(now - 30 * 24 * 60 * 60 * 1000);
-
-  const totalMap = hasTotal ? await groupCount() : new Map<string, number>();
-  const m1 = has1d ? await groupCount(d1) : new Map<string, number>();
-  const m7 = has7d ? await groupCount(d7) : new Map<string, number>();
-  const m30 = has30d ? await groupCount(d30) : new Map<string, number>();
-
-  // 更新対象 videoId の集合
-  const ids = new Set<string>([
-    ...totalMap.keys(),
-    ...m1.keys(),
-    ...m7.keys(),
-    ...m30.keys(),
-  ]);
-  let updatedRows = 0;
-
-  // 大量更新になり得るので、トランザクション＋並列は控えめ
-  await prisma.$transaction(
-    async (tx) => {
-      for (const id of ids) {
-        const data: any = {};
-        if (hasTotal) data.supportTotal = totalMap.get(id) ?? 0;
-        if (has1d) data.support1d = m1.get(id) ?? 0;
-        if (has7d) data.support7d = m7.get(id) ?? 0;
-        if (has30d) data.support30d = m30.get(id) ?? 0;
-
-        try {
-          await tx.video.update({
-            where: { id },
-            data,
-            select: { id: true },
-          });
-          updatedRows++;
-        } catch (e) {
-          // 既に消えた videoId などはスキップ
-        }
-      }
-    },
-    { timeout: 60_000 }
-  );
-
-  return {
-    ok: true,
-    updatedRows,
-    columns: {
-      supportTotal: hasTotal,
-      support1d: has1d,
-      support7d: has7d,
-      support30d: has30d,
-    },
-  };
-}
-
-// 検索用テキストの同期（任意）：title + channelTitle を search_text に格納する等
-async function rebuildSearchTextIfExists() {
-  const hasSearch = await columnExists("Video", "search_text");
-  if (!hasSearch) return { ok: true, skipped: true };
-
-  // 適当な同義：COALESCE(title,'') || ' ' || COALESCE(channelTitle,'')
-  try {
-    // 全件更新は重いので、「空 or null だけ更新」に留める
-    await prisma.$executeRawUnsafe(`
-      UPDATE "Video"
-         SET "search_text" = TRIM(COALESCE("title",'') || ' ' || COALESCE("channelTitle",''))
-       WHERE "search_text" IS NULL OR "search_text" = '';
-    `);
-    return { ok: true, skipped: false };
   } catch (e: any) {
-    return { ok: false, skipped: false, error: String(e?.message ?? e) };
+    steps.recomputeSupport = err(e?.message ?? "recompute failed");
   }
-}
 
-// 必要ページの再検証（ISR/SSG を使っていなくても無害）
-async function revalidateAll() {
+  // ---------------------------------
+  // 2) 検索用の再構築（あれば）
+  //    - 例: Video.searchVector があれば to_tsvector で更新
+  // ---------------------------------
   try {
-    revalidatePath("/");            // ホーム
-    revalidatePath("/trending");    // 急上昇
-    revalidatePath("/search");      // 検索
-    return { ok: true };
-  } catch (e: any) {
-    return { ok: false, error: String(e?.message ?? e) };
-  }
-}
-
-export async function GET(req: NextRequest) {
-  if (!authorize(req)) {
-    return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
-  }
-
-  const startedAt = new Date().toISOString();
-
-  // 1) 取り込み（任意：環境変数で有効化）
-  const ingestRes = await ingestNewVideosIfConfigured();
-
-  // 2) 応援の再集計（累計＋レンジ）
-  const supportRes = await recomputeSupportCounters();
-
-  // 3) 検索用テキスト再構築（任意）
-  const searchRes = await rebuildSearchTextIfExists();
-
-  // 4) ページ再検証
-  const revalRes = await revalidateAll();
-
-  const finishedAt = new Date().toISOString();
-
-  return NextResponse.json(
-    {
-      ok: true,
-      startedAt,
-      finishedAt,
-      steps: {
-        ingest: ingestRes,
-        recomputeSupport: supportRes,
-        rebuildSearch: searchRes,
-        revalidate: revalRes,
-      },
-    },
-    {
-      headers: {
-        // 念のためキャッシュさせない
-        "Cache-Control": "no-store",
-      },
+    const hasSearchVector = await columnExists("Video", "searchVector");
+    if (hasSearchVector && !dryRun) {
+      // extension や辞書は環境ごとに異なるので simple を既定に
+      await prisma.$executeRawUnsafe(`
+        UPDATE "Video" v
+        SET "searchVector" = to_tsvector('simple',
+          coalesce(v.title, '') || ' ' ||
+          coalesce(v."channelTitle", '')
+        )
+      `);
+      steps.rebuildSearch = ok({ skipped: false });
+    } else {
+      steps.rebuildSearch = ok({ skipped: true });
     }
-  );
+  } catch (e: any) {
+    steps.rebuildSearch = err(e?.message ?? "rebuild search failed");
+  }
+
+  // ---------------------------------
+  // 3) 再検証（ISR/SSG の更新トリガ）
+  // ---------------------------------
+  try {
+    // 主要ページ
+    revalidatePath("/");
+    revalidatePath("/trending");
+    // 検索ページは CSR/SR mix なら不要だが、必要に応じて追加可
+    steps.revalidate = ok({});
+  } catch (e: any) {
+    steps.revalidate = err(e?.message ?? "revalidate failed");
+  }
+
+  const body: Result = {
+    ok: true,
+    env: ENV,
+    dryRun,
+    startedAt: startedAt.toISOString(),
+    finishedAt: new Date().toISOString(),
+    steps,
+  };
+
+  return NextResponse.json(body, { headers: { "Cache-Control": "no-store" } });
 }
+
+// 手動 POST 実行にも対応
+export const POST = GET;
