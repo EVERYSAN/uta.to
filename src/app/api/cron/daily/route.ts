@@ -6,27 +6,38 @@ import { revalidatePath } from "next/cache";
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
 
-/* ========== 型定義（省略なし） ========== */
+/* ========== 型定義（フル） ========== */
 type IngestStep =
   | { ok: true; skipped: boolean; added: number; updated: number }
   | { ok: false; error: string };
 
+type WindowStat = { updatedViaJoin: number; zeroFilled: number };
+
 type RecomputeHas = {
   supportCount: boolean;
-  supportTotal: boolean;
-  supportPoints: boolean;
+  supportTotal: boolean;   // ある環境ではこの列名を使用
+  supportPoints: boolean;  // ある環境ではこの列名を使用
   support1d: boolean;
   support7d: boolean;
   support30d: boolean;
+  sePointsColumn: boolean; // SupportEvent に points 列があるか
 };
-type WindowStat = { updatedViaJoin: number; zeroFilled: number };
 
 type RecomputeStep =
   | {
       ok: true;
-      totals?: WindowStat;
       has: RecomputeHas;
-      windows?: { d1?: WindowStat; d7?: WindowStat; d30?: WindowStat };
+      totals?: {
+        updatedViaJoin: number;
+        zeroFilled: number;
+        setExprForCount: string;
+        setExprForPoints: string;
+      };
+      windows?: {
+        d1?: WindowStat;
+        d7?: WindowStat;
+        d30?: WindowStat;
+      };
     }
   | { ok: false; error: string };
 
@@ -50,12 +61,12 @@ type Result = {
   };
 };
 
-const ENV =
-  (process.env.VERCEL_ENV as Result["env"]) ||
-  (process.env.NODE_ENV as Result["env"]) ||
+/* ========== ユーティリティ ========== */
+const ENV: Result["env"] =
+  (process.env.VERCEL_ENV as any) ||
+  (process.env.NODE_ENV as any) ||
   "unknown";
 
-/* ========== ユーティリティ ========== */
 function pickSecretFrom(req: Request): string | undefined {
   const u = new URL(req.url);
   const qs = u.searchParams.get("secret") ?? undefined;
@@ -66,15 +77,28 @@ function pickSecretFrom(req: Request): string | undefined {
   return qs || hdr;
 }
 
+function resolveExpectedSecret(): string | undefined {
+  // 環境ごとに使い分け可。なければ CRON_SECRET を共通で使用。
+  if (ENV === "production" && process.env.CRON_SECRET_PROD) {
+    return process.env.CRON_SECRET_PROD;
+  }
+  if (ENV === "preview" && process.env.CRON_SECRET_PREVIEW) {
+    return process.env.CRON_SECRET_PREVIEW;
+  }
+  return process.env.CRON_SECRET;
+}
+
 function requireAuthorized(req: Request) {
-  const expected = process.env.CRON_SECRET;
+  const expected = resolveExpectedSecret();
   if (!expected) throw new Error("CRON_SECRET is not set");
   const got = pickSecretFrom(req);
   if (got !== expected) throw new Error("unauthorized");
 }
 
 async function columnExists(table: string, column: string): Promise<boolean> {
-  // Prisma の quoted 識別子（"Video" / "SupportEvent"）前提で information_schema を参照
+  // table は実テーブル名（小文字）。Prisma は "Video" として扱うが information_schema は小文字で保管されることに注意
+  // Neon/PG で通常、未クォート作成なら小文字、クォート作成ならそのまま。
+  // Prisma のテーブルはクォートで作成されるため、情報スキーマでは小文字になることが多い。
   const rows = await prisma.$queryRawUnsafe<{ exists: boolean }[]>(
     `
       SELECT EXISTS (
@@ -91,75 +115,143 @@ async function columnExists(table: string, column: string): Promise<boolean> {
   return !!rows?.[0]?.exists;
 }
 
-/* 合計カラム群（存在するものだけ更新対象にする） */
-async function detectTotalCols(): Promise<string[]> {
-  const candidates = ["supportCount", "supportTotal", "supportPoints"];
-  const exists: string[] = [];
-  for (const c of candidates) {
-    if (await columnExists("Video", c)) exists.push(c);
+/** Video 側の合計カラム（存在するものだけ） */
+async function detectVideoTotalCols(): Promise<{
+  countCol?: "supportCount";
+  totalCol?: "supportTotal" | "supportPoints";
+}> {
+  const hasCount = await columnExists("video", "supportcount").catch(() => false);
+  // 片方・または両方存在し得る
+  const hasTotal = await columnExists("video", "supporttotal").catch(() => false);
+  const hasPoints = await columnExists("video", "supportpoints").catch(() => false);
+
+  return {
+    countCol: hasCount ? "supportCount" : undefined,
+    totalCol: hasTotal ? "supportTotal" : hasPoints ? "supportPoints" : undefined,
+  };
+}
+
+async function detectWindows(): Promise<{
+  w1d: boolean;
+  w7d: boolean;
+  w30d: boolean;
+}> {
+  const w1d = await columnExists("video", "support1d").catch(() => false);
+  const w7d = await columnExists("video", "support7d").catch(() => false);
+  const w30d = await columnExists("video", "support30d").catch(() => false);
+  return { w1d, w7d, w30d };
+}
+
+async function detectSEPoints(): Promise<boolean> {
+  return columnExists("supportevent", "points").catch(() => false);
+}
+
+/** searchVector を持っていれば再構築 */
+async function rebuildSearchVector(dryRun: boolean): Promise<boolean> {
+  const has = await columnExists("video", "searchvector").catch(() => false);
+  if (!has || dryRun) return false;
+  await prisma.$executeRawUnsafe(`
+    UPDATE "Video" v
+    SET "searchVector" = to_tsvector('simple',
+      coalesce(v.title, '') || ' ' || coalesce(v."channelTitle", '')
+    )
+  `);
+  return true;
+}
+
+/** 合計（全期間）の更新：count/points を列有無・SE.points 有無に合わせて更新 */
+async function updateTotals(
+  opts: {
+    countCol?: "supportCount";
+    totalCol?: "supportTotal" | "supportPoints";
+    seHasPoints: boolean;
+  },
+  dryRun: boolean
+): Promise<{
+  updatedViaJoin: number;
+  zeroFilled: number;
+  setExprForCount: string;
+  setExprForPoints: string;
+}> {
+  if (dryRun || (!opts.countCol && !opts.totalCol)) {
+    return {
+      updatedViaJoin: 0,
+      zeroFilled: 0,
+      setExprForCount: "n/a",
+      setExprForPoints: "n/a",
+    };
   }
-  return exists;
-}
 
-/* SET 句を安全に組み立て（固定配列からのみ生成） */
-function setClause(cols: string[], rhsExpr: string): string {
-  return cols.map((c) => `"${c}" = ${rhsExpr}`).join(", ");
-}
+  // SupportEvent 側の集計式
+  const exprCount = `COUNT(*)::int`;
+  const exprPoints = opts.seHasPoints
+    ? `SUM(COALESCE(se.points, 1))::int`
+    : `COUNT(*)::int`;
 
-/* 合計（SupportEvent 全期間）の更新 */
-async function updateTotals(cols: string[], dryRun: boolean): Promise<WindowStat> {
-  if (cols.length === 0 || dryRun) return { updatedViaJoin: 0, zeroFilled: 0 };
-
-  const setJoin = setClause(cols, "c.cnt");
-  const setZero = setClause(cols, "0");
-
+  // CTE で両方出す（必要な側だけ使う）
   const updatedViaJoin = await prisma.$executeRawUnsafe<number>(`
     WITH counts AS (
-      SELECT "videoId", COUNT(*)::int AS cnt
-      FROM "SupportEvent"
+      SELECT "videoId" AS vid,
+             ${exprCount} AS cnt,
+             ${exprPoints} AS pts
+      FROM "SupportEvent" se
       GROUP BY "videoId"
     )
-    UPDATE "Video" AS v
-    SET ${setJoin}
+    UPDATE "Video" v
+    SET
+      ${opts.countCol ? `"${opts.countCol}" = c.cnt` : `"id" = v.id"`},
+      ${opts.totalCol ? `"${opts.totalCol}" = c.pts` : `"id" = v.id"`}
     FROM counts c
-    WHERE v.id = c."videoId"
+    WHERE v.id = c.vid
   `);
 
-  const zeroFilled = await prisma.$executeRawUnsafe<number>(`
-    UPDATE "Video" AS v
-    SET ${setZero}
-    WHERE NOT EXISTS (
-      SELECT 1 FROM "SupportEvent" se WHERE se."videoId" = v.id
-    )
-  `);
+  // 0 埋め（全期間でイベント無し）
+  const setZeroPieces: string[] = [];
+  if (opts.countCol) setZeroPieces.push(`"${opts.countCol}" = 0`);
+  if (opts.totalCol) setZeroPieces.push(`"${opts.totalCol}" = 0`);
+  const setZero = setZeroPieces.join(", ");
 
-  return { updatedViaJoin, zeroFilled };
+  let zeroFilled = 0;
+  if (setZero) {
+    zeroFilled = await prisma.$executeRawUnsafe<number>(`
+      UPDATE "Video" v
+      SET ${setZero}
+      WHERE NOT EXISTS (SELECT 1 FROM "SupportEvent" se WHERE se."videoId" = v.id)
+    `);
+  }
+
+  return {
+    updatedViaJoin,
+    zeroFilled,
+    setExprForCount: exprCount,
+    setExprForPoints: exprPoints,
+  };
 }
 
-/* 期間別（1d/7d/30d）を 1 列ずつ更新 */
+/** 期間別（1d/7d/30d）カラムを更新（存在する列だけ） */
 async function updateWindow(
   col: "support1d" | "support7d" | "support30d",
   intervalSql: string,
   dryRun: boolean
 ): Promise<WindowStat> {
-  if (!(await columnExists("Video", col)) || dryRun)
-    return { updatedViaJoin: 0, zeroFilled: 0 };
+  const exists = await columnExists("video", col.toLowerCase()).catch(() => false);
+  if (!exists || dryRun) return { updatedViaJoin: 0, zeroFilled: 0 };
 
   const updatedViaJoin = await prisma.$executeRawUnsafe<number>(`
     WITH counts AS (
-      SELECT "videoId", COUNT(*)::int AS cnt
+      SELECT "videoId" AS vid, COUNT(*)::int AS cnt
       FROM "SupportEvent"
       WHERE "createdAt" >= NOW() - ${intervalSql}
       GROUP BY "videoId"
     )
-    UPDATE "Video" AS v
+    UPDATE "Video" v
     SET "${col}" = c.cnt
     FROM counts c
-    WHERE v.id = c."videoId"
+    WHERE v.id = c.vid
   `);
 
   const zeroFilled = await prisma.$executeRawUnsafe<number>(`
-    UPDATE "Video" AS v
+    UPDATE "Video" v
     SET "${col}" = 0
     WHERE NOT EXISTS (
       SELECT 1
@@ -172,23 +264,9 @@ async function updateWindow(
   return { updatedViaJoin, zeroFilled };
 }
 
-/* searchVector の再構築 */
-async function rebuildSearchVector(dryRun: boolean): Promise<boolean> {
-  const has = await columnExists("Video", "searchVector");
-  if (!has || dryRun) return false;
-
-  await prisma.$executeRawUnsafe(`
-    UPDATE "Video" v
-    SET "searchVector" = to_tsvector('simple',
-      coalesce(v.title, '') || ' ' || coalesce(v."channelTitle", '')
-    )
-  `);
-  return true;
-}
-
-/* ========== ハンドラ本体 ========== */
+/* ========== ルート本体 ========== */
 export async function GET(req: Request) {
-  // 認証
+  // 認可
   try {
     requireAuthorized(req);
   } catch (e: any) {
@@ -202,43 +280,50 @@ export async function GET(req: Request) {
   const url = new URL(req.url);
   const dryRun = url.searchParams.get("dry") === "1";
 
-  // レスポンス雛形（型安全に直書き）
   const steps: Result["steps"] = {
-    ingest: { ok: true, skipped: true, added: 0, updated: 0 }, // 取り込みは将来拡張
+    // 取り込み（今は枠のみ。将来的に新着取り込み等を入れる想定）
+    ingest: { ok: true, skipped: true, added: 0, updated: 0 },
     recomputeSupport: { ok: false, error: "not-started" },
     rebuildSearch: { ok: true, skipped: true },
     revalidate: { ok: false, error: "not-started" },
   };
 
-  // 1) 合計 & 期間別の再計算
+  // 1) 合計＆期間別の再計算
   try {
-    // どのカラムが存在するかを確認
-    const totalCols = await detectTotalCols();
-    const has1d = await columnExists("Video", "support1d");
-    const has7d = await columnExists("Video", "support7d");
-    const has30d = await columnExists("Video", "support30d");
+    const seHasPoints = await detectSEPoints();
+    const totalsCols = await detectVideoTotalCols();
+    const windows = await detectWindows();
 
-    // 合計の更新
-    const totals = await updateTotals(totalCols, dryRun);
+    const totals = await updateTotals(
+      {
+        countCol: totalsCols.countCol,
+        totalCol: totalsCols.totalCol,
+        seHasPoints,
+      },
+      dryRun
+    );
 
-    // 期間別の更新
-    const windows: { d1?: WindowStat; d7?: WindowStat; d30?: WindowStat } = {};
-    if (has1d) windows.d1 = await updateWindow("support1d", `INTERVAL '1 day'`, dryRun);
-    if (has7d) windows.d7 = await updateWindow("support7d", `INTERVAL '7 days'`, dryRun);
-    if (has30d) windows.d30 = await updateWindow("support30d", `INTERVAL '30 days'`, dryRun);
+    const winStat: { d1?: WindowStat; d7?: WindowStat; d30?: WindowStat } = {};
+    if (windows.w1d) winStat.d1 = await updateWindow("support1d", `INTERVAL '1 day'`, dryRun);
+    if (windows.w7d) winStat.d7 = await updateWindow("support7d", `INTERVAL '7 days'`, dryRun);
+    if (windows.w30d) winStat.d30 = await updateWindow("support30d", `INTERVAL '30 days'`, dryRun);
 
     steps.recomputeSupport = {
       ok: true,
-      totals: totalCols.length ? totals : undefined,
       has: {
-        supportCount: totalCols.includes("supportCount"),
-        supportTotal: totalCols.includes("supportTotal"),
-        supportPoints: totalCols.includes("supportPoints"),
-        support1d: has1d,
-        support7d: has7d,
-        support30d: has30d,
+        supportCount: !!totalsCols.countCol,
+        supportTotal: totalsCols.totalCol === "supportTotal",
+        supportPoints: totalsCols.totalCol === "supportPoints",
+        support1d: windows.w1d,
+        support7d: windows.w7d,
+        support30d: windows.w30d,
+        sePointsColumn: seHasPoints,
       },
-      windows,
+      totals:
+        totalsCols.countCol || totalsCols.totalCol
+          ? totals
+          : undefined,
+      windows: winStat,
     };
   } catch (e: any) {
     steps.recomputeSupport = { ok: false, error: e?.message ?? "recompute failed" };
@@ -254,6 +339,7 @@ export async function GET(req: Request) {
 
   // 3) ページ再検証
   try {
+    // 影響しそうなページ達
     revalidatePath("/");
     revalidatePath("/trending");
     revalidatePath("/search");
