@@ -1,4 +1,3 @@
-// src/app/layout.tsx
 import './globals.css';
 import type { Metadata } from 'next';
 import Header from '@/components/Header';
@@ -24,7 +23,6 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
   return (
     <html lang="ja">
       <head>
-        {/* YouTube を速くするための事前接続 */}
         <link rel="preconnect" href="https://www.youtube.com" />
         <link rel="preconnect" href="https://www.youtube-nocookie.com" />
         <link rel="preconnect" href="https://i.ytimg.com" />
