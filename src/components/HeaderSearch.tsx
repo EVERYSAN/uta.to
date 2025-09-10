@@ -1,7 +1,6 @@
 'use client';
 
 import { useEffect, useRef } from 'react';
-import { useSearchParams } from 'next/navigation';
 
 type Range = '1d' | '7d' | '30d';
 type Sort = 'hot' | 'new' | 'support';
@@ -16,11 +15,9 @@ export default function HeaderSearch({
   defaultShorts?: Shorts;
   defaultSort?: Sort;
 }) {
-  const sp = useSearchParams();
   const inputRef = useRef<HTMLInputElement>(null);
-  const qFromURL = sp.get('q') ?? '';
 
-  // 「/」キーでフォーカス（ニコニコ風）
+  // ニコニコ風ショートカット: "/" でフォーカス
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       const tag = (e.target as HTMLElement)?.tagName;
@@ -35,18 +32,15 @@ export default function HeaderSearch({
 
   return (
     <form role="search" action="/search" method="GET" className="w-full">
-      {/* 既定の検索条件を hidden で付与 */}
       <input type="hidden" name="range" value={defaultRange} />
       <input type="hidden" name="shorts" value={defaultShorts} />
       <input type="hidden" name="sort" value={defaultSort} />
-
       <label htmlFor="global-search" className="sr-only">動画を検索</label>
       <div className="relative">
         <input
           id="global-search"
           ref={inputRef}
           name="q"
-          defaultValue={qFromURL}
           placeholder="動画を検索（/ でフォーカス）"
           autoComplete="off"
           className="w-full rounded-full bg-white px-5 py-3 pr-14 text-sm outline-none
