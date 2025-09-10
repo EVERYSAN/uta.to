@@ -1,20 +1,8 @@
-// Server → Suspense → Client 構成
-import { Suspense } from "react";
-
-export const dynamic = "force-dynamic";
-
-export default function Page() {
-  return (
-    <Suspense fallback={<div className="py-10 text-sm text-neutral-500">検索中...</div>}>
-      <SearchContent />
-    </Suspense>
-  );
-}
-
-// ↓ここから “元の実装” を移植（Client）
+// src/app/search/page.tsx
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useRouter } from "next/navigation";
 import Link from "next/link";
 
 type Item = {
@@ -29,22 +17,25 @@ type Item = {
   publishedAt?: string | Date | null;
   views?: number;
   likes?: number;
-  supportPoints?: number;
+  supportPoints?: number; // API が付与
 };
 
-function SearchContent() {
-  // URLクエリ ←→ 状態（初回は window.location から読む）
+export default function SearchPage() {
+  const router = useRouter();
+
+  // --- URLクエリ ←→ 状態（初期のみ location から読む） ---
   const [q, setQ] = useState("");
-  const [range, setRange] = useState<"1d" | "7d" | "30d">("7d"); // 既定を7dに
+  const [range, setRange] = useState<"1d" | "7d" | "30d">("1d");
   const [shorts, setShorts] = useState<"all" | "exclude" | "only">("all");
   const [sort, setSort] = useState<"hot" | "new" | "support">("hot");
 
   useEffect(() => {
     const s = new URLSearchParams(window.location.search);
     setQ(s.get("q") ?? "");
-    setRange(((s.get("range") as any) ?? "7d") as "1d" | "7d" | "30d");
-    setShorts(((s.get("shorts") as any) ?? "all") as "all" | "exclude" | "only");
-    setSort(((s.get("sort") as any) ?? "hot") as "hot" | "new" | "support");
+    setRange((s.get("range") as any) ?? "1d");
+    setShorts((s.get("shorts") as any) ?? "all");
+    setSort((s.get("sort") as any) ?? "hot");
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const [items, setItems] = useState<Item[]>([]);
@@ -69,10 +60,10 @@ function SearchContent() {
     p.set("range", range);
     p.set("shorts", shorts);
     p.set("sort", sort);
-    const url = `/search?${p.toString()}`;
-    window.history.replaceState(null, "", url);
-  }, [q, range, shorts, sort]);
+    router.replace(`/search?${p.toString()}`, { scroll: false });
+  }, [q, range, shorts, sort, router]);
 
+  // --- API 呼び出し ---
   const fetchPage = useCallback(
     async (reset = false) => {
       abortRef.current?.abort();
@@ -92,6 +83,7 @@ function SearchContent() {
     [queryString]
   );
 
+  // 条件が変わったら 1 ページ目から取り直す
   useEffect(() => {
     setPage(1);
     fetchPage(true);
@@ -99,6 +91,7 @@ function SearchContent() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [q, range, shorts, sort]);
 
+  // ページ増分
   useEffect(() => {
     if (page === 1) return;
     fetchPage(false);
@@ -213,29 +206,29 @@ function Toolbar({
   setSort,
   compact,
 }: {
-  range: "1d" | "7d" | "30d";
-  setRange: (v: "1d" | "7d" | "30d") => void;
-  shorts: "all" | "exclude" | "only";
-  setShorts: (v: "all" | "exclude" | "only") => void;
-  sort: "hot" | "new" | "support";
-  setSort: (v: "hot" | "new" | "support") => void;
+  range: string;
+  setRange: (v: any) => void;
+  shorts: string;
+  setShorts: (v: any) => void;
+  sort: string;
+  setSort: (v: any) => void;
   compact?: boolean;
 }) {
   const btn = "px-3 py-1.5 rounded-lg bg-white/10 hover:bg-white/20 text-sm";
   const wrap = compact ? "flex gap-2 flex-wrap" : "flex gap-2 items-center";
   return (
     <div className={wrap}>
-      <select value={range} onChange={(e) => setRange(e.target.value as any)} className={btn}>
+      <select value={range} onChange={(e) => setRange(e.target.value)} className={btn}>
         <option value="1d">24h</option>
         <option value="7d">7日</option>
         <option value="30d">30日</option>
       </select>
-      <select value={shorts} onChange={(e) => setShorts(e.target.value as any)} className={btn}>
+      <select value={shorts} onChange={(e) => setShorts(e.target.value)} className={btn}>
         <option value="all">すべて</option>
         <option value="exclude">ショート除外</option>
         <option value="only">ショートのみ</option>
       </select>
-      <select value={sort} onChange={(e) => setSort(e.target.value as any)} className={btn}>
+      <select value={sort} onChange={(e) => setSort(e.target.value)} className={btn}>
         <option value="hot">人気</option>
         <option value="new">新着</option>
         <option value="support">応援</option>
