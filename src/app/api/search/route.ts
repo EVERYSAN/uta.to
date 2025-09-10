@@ -3,7 +3,7 @@ import { NextRequest, NextResponse } from "next/server";
 import type { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 
-export const dynamic = "force-dynamic";
+export const dynamic = "force-dynamic"; // request.url を読むので静的化不可
 const NO_STORE = { "Cache-Control": "no-store" } as const;
 
 type Range = "1d" | "7d" | "30d";
@@ -28,9 +28,11 @@ const sinceFrom = (range: Range) =>
   new Date(Date.now() - (range === "1d" ? 1 : range === "7d" ? 7 : 30) * 24 * 60 * 60 * 1000);
 
 const shortsFilter = (shorts: Shorts) =>
-  shorts === "exclude" ? ({ NOT: { url: { contains: "/shorts/" } } } as const)
-  : shorts === "only" ? ({ url: { contains: "/shorts/" } } as const)
-  : ({} as const);
+  shorts === "exclude"
+    ? ({ NOT: { url: { contains: "/shorts/" } } } as const)
+    : shorts === "only"
+    ? ({ url: { contains: "/shorts/" } } as const)
+    : ({} as const);
 
 function buildVideoWhere(q: string, range: Range, shorts: Shorts): Prisma.VideoWhereInput {
   const where: Prisma.VideoWhereInput = {
@@ -62,21 +64,26 @@ export async function GET(req: NextRequest) {
     const whereVideo = buildVideoWhere(q, range, shorts);
     const since = sinceFrom(range);
 
-    // support並び：SupportEvent側でgroupBy → その順にVideo取得
+    // --- 応援順：SupportEvent を groupBy で直接ページング ---
     if (sort === "support") {
       const grouped = await prisma.supportEvent.groupBy({
         by: ["videoId"],
         where: { createdAt: { gte: since }, video: whereVideo },
         _count: { videoId: true },
-        orderBy: { _count: { videoId: "desc" } },
+        orderBy: { _count: { videoId: "desc" } }, // または _all でも可
         skip,
         take,
       });
+
       if (grouped.length === 0) {
         return NextResponse.json({ ok: true, items: [], page, take }, { headers: NO_STORE });
       }
+
       const ids = grouped.map(g => g.videoId);
-      const videos = await prisma.video.findMany({ where: { id: { in: ids } }, select: selectVideo });
+      const videos = await prisma.video.findMany({
+        where: { id: { in: ids } },
+        select: selectVideo,
+      });
       const vmap = new Map(videos.map(v => [v.id, v]));
       const items = grouped
         .map(g => {
@@ -84,9 +91,44 @@ export async function GET(req: NextRequest) {
           return v ? { ...v, supportPoints: g._count.videoId } : null;
         })
         .filter(Boolean);
+
       return NextResponse.json({ ok: true, items, page, take }, { headers: NO_STORE });
     }
 
-    // hot/new：VideoをDBソート → 期間内Supportを合成
-    const orderBy = sort === "new" ? [{ publishedAt: "desc" as const }] : [{ views: "desc" as const }];
-    const videos = await prisma.video.findMany({ where: whereVideo
+    // --- hot/new：Video を DB ソート → 期間内 Support 件数を合成 ---
+    const orderBy =
+      sort === "new" ? [{ publishedAt: "desc" as const }] : [{ views: "desc" as const }];
+
+    const videos = await prisma.video.findMany({
+      where: whereVideo,
+      orderBy,
+      skip,
+      take,
+      select: selectVideo,
+    });
+
+    if (videos.length === 0) {
+      return NextResponse.json({ ok: true, items: [], page, take }, { headers: NO_STORE });
+    }
+
+    const ids = videos.map(v => v.id);
+    const grouped = await prisma.supportEvent.groupBy({
+      by: ["videoId"],
+      where: { videoId: { in: ids }, createdAt: { gte: since } },
+      _count: { videoId: true },
+    });
+    const supportMap = new Map(grouped.map(g => [g.videoId, g._count.videoId]));
+    const items = videos.map(v => ({
+      ...v,
+      supportPoints: supportMap.get(v.id) ?? 0,
+    }));
+
+    return NextResponse.json({ ok: true, items, page, take }, { headers: NO_STORE });
+  } catch (err) {
+    console.error("[/api/search] error:", err);
+    return NextResponse.json(
+      { ok: false, error: "search_failed" },
+      { status: 500, headers: NO_STORE }
+    );
+  }
+}
