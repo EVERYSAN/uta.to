@@ -33,7 +33,7 @@ function getApiKeys(): string[] {
 }
 
 async function fetchJson<T>(url: string) {
-  const r = await fetch(url, { next: { revalidate: 0 }, cache: "no-store" });
+  const r = await fetch(url, { cache: "no-store" });
   if (!r.ok) {
     const text = await r.text().catch(() => "");
     throw new Error(`HTTP ${r.status} ${r.statusText} for ${url}\n${text}`);
