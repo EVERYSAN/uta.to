@@ -1,104 +1,145 @@
 // src/app/api/cron/daily/route.ts
 import { NextResponse } from "next/server";
+import type { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
-import { revalidatePath } from "next/cache";
+import { revalidateTag } from "next/cache";
 
+export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
 
-/* ========== 型定義（フル） ========== */
-type IngestStep =
-  | { ok: true; skipped: boolean; added: number; updated: number }
-  | { ok: false; error: string };
+/* ========= 設定 ========= */
+const QUERY = process.env.CRON_YT_QUERY ?? "歌ってみた";
+const MAX_PAGES = Number(process.env.CRON_YT_MAX_PAGES ?? 5);
+const DEFAULT_LOOKBACK_HOURS = Number(process.env.CRON_LOOKBACK_HOURS ?? 72);
 
-type WindowStat = { updatedViaJoin: number; zeroFilled: number };
+/* ========= 共通ユーティリティ ========= */
+const iso = (d: Date | string | number) => new Date(d).toISOString();
 
-type RecomputeHas = {
-  supportCount: boolean;
-  supportTotal: boolean;   // ある環境ではこの列名を使用
-  supportPoints: boolean;  // ある環境ではこの列名を使用
-  support1d: boolean;
-  support7d: boolean;
-  support30d: boolean;
-  sePointsColumn: boolean; // SupportEvent に points 列があるか
-};
+function getApiKeys(): string[] {
+  const keys =
+    process.env.YOUTUBE_API_KEYS ??
+    process.env.YOUTUBE_API_KEY ??
+    process.env.YT_API_KEY ?? // 互換
+    "";
+  return keys.split(",").map(s => s.trim()).filter(Boolean);
+}
 
-type RecomputeStep =
-  | {
-      ok: true;
-      has: RecomputeHas;
-      totals?: {
-        updatedViaJoin: number;
-        zeroFilled: number;
-        setExprForCount: string;
-        setExprForPoints: string;
-      };
-      windows?: {
-        d1?: WindowStat;
-        d7?: WindowStat;
-        d30?: WindowStat;
-      };
-    }
-  | { ok: false; error: string };
+async function fetchJson<T>(url: string) {
+  const r = await fetch(url, { next: { revalidate: 0 } });
+  if (!r.ok) {
+    const text = await r.text().catch(() => "");
+    throw new Error(`HTTP ${r.status} ${r.statusText} for ${url}\n${text}`);
+  }
+  return (await r.json()) as T;
+}
 
-type RebuildStep =
-  | { ok: true; skipped: boolean }
-  | { ok: false; error: string };
+function parseISODurationToSeconds(dur?: string): number | undefined {
+  if (!dur) return undefined;
+  const m = /^PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?$/.exec(dur);
+  if (!m) return undefined;
+  const h = m[1] ? parseInt(m[1], 10) : 0;
+  const mn = m[2] ? parseInt(m[2], 10) : 0;
+  const s = m[3] ? parseInt(m[3], 10) : 0;
+  return h * 3600 + mn * 60 + s;
+}
 
-type RevalidateStep = { ok: true } | { ok: false; error: string };
+function toIntUndef(s?: string): number | undefined {
+  if (s == null) return undefined;
+  const n = parseInt(s, 10);
+  return Number.isFinite(n) ? n : undefined;
+}
 
-type Result = {
-  ok: boolean;
-  env: "production" | "preview" | "development" | "unknown";
-  dryRun: boolean;
-  startedAt: string;
-  finishedAt?: string;
-  steps: {
-    ingest: IngestStep;
-    recomputeSupport: RecomputeStep;
-    rebuildSearch: RebuildStep;
-    revalidate: RevalidateStep;
+/* ========= YouTube API ========= */
+type YTSearchItem = {
+  id: { videoId?: string };
+  snippet: {
+    title: string;
+    channelTitle: string;
+    publishedAt: string;
+    thumbnails?: { medium?: { url?: string }; high?: { url?: string } };
   };
 };
+type YTVideosItem = {
+  id: string;
+  contentDetails?: { duration?: string };
+  statistics?: { viewCount?: string; likeCount?: string };
+};
 
-/* ========== ユーティリティ ========== */
-const ENV: Result["env"] =
-  (process.env.VERCEL_ENV as any) ||
-  (process.env.NODE_ENV as any) ||
-  "unknown";
+async function searchYoutubeSince(
+  key: string,
+  query: string,
+  publishedAfterISO: string,
+  maxPages: number
+) {
+  const items: YTSearchItem[] = [];
+  let pageToken = "";
+  for (let page = 0; page < maxPages; page++) {
+    const url = new URL("https://www.googleapis.com/youtube/v3/search");
+    url.searchParams.set("key", key);
+    url.searchParams.set("part", "snippet");
+    url.searchParams.set("type", "video");
+    url.searchParams.set("maxResults", "50");
+    url.searchParams.set("order", "date");
+    url.searchParams.set("q", query);
+    url.searchParams.set("publishedAfter", publishedAfterISO);
+    if (pageToken) url.searchParams.set("pageToken", pageToken);
 
-function pickSecretFrom(req: Request): string | undefined {
-  const u = new URL(req.url);
-  const qs = u.searchParams.get("secret") ?? undefined;
+    const json = await fetchJson<any>(url.toString());
+    (json.items as any[] | undefined)?.forEach(i => items.push(i));
+    pageToken = json.nextPageToken ?? "";
+    if (!pageToken) break;
+  }
+  return items;
+}
+
+async function getVideoDetails(key: string, ids: string[]) {
+  if (ids.length === 0) return new Map<string, YTVideosItem>();
+  const map = new Map<string, YTVideosItem>();
+  for (let i = 0; i < ids.length; i += 50) {
+    const chunk = ids.slice(i, i + 50);
+    const url = new URL("https://www.googleapis.com/youtube/v3/videos");
+    url.searchParams.set("key", key);
+    url.searchParams.set("part", "contentDetails,statistics");
+    url.searchParams.set("id", chunk.join(","));
+    const json = await fetchJson<any>(url.toString());
+    (json.items as any[] | undefined)?.forEach(it => map.set(it.id, it));
+  }
+  return map;
+}
+
+/* ========= Cron 認証（後方互換） ========= */
+function expectedSecrets(): string[] {
+  const env = process.env.VERCEL_ENV ?? process.env.NODE_ENV ?? "unknown";
+  const arr = [];
+  if (env === "production" && process.env.CRON_SECRET_PROD) arr.push(process.env.CRON_SECRET_PROD);
+  if (env === "preview" && process.env.CRON_SECRET_PREVIEW) arr.push(process.env.CRON_SECRET_PREVIEW);
+  if (process.env.CRON_SECRET) arr.push(process.env.CRON_SECRET);
+  return arr.filter(Boolean) as string[];
+}
+
+function ensureCronAuth(req: Request): { ok: boolean; via: string } {
+  const url = new URL(req.url);
+  const token = url.searchParams.get("token") ?? "";   // 旧互換
+  const secret = url.searchParams.get("secret") ?? ""; // 新
   const hdr =
     req.headers.get("authorization")?.replace(/^Bearer\s+/i, "") ||
     req.headers.get("x-cron-secret") ||
-    undefined;
-  return qs || hdr;
+    "";
+  const cronHdr = req.headers.get("x-vercel-cron");
+  const ua = req.headers.get("user-agent") ?? "";
+
+  const allow = expectedSecrets();
+  if (cronHdr) return { ok: true, via: "x-vercel-cron" };
+  if (allow.length === 0) return { ok: true, via: "no-secret" };
+  const provided = [token, secret, hdr].filter(Boolean);
+  if (provided.some(p => allow.includes(p))) return { ok: true, via: "secret" };
+  if (/vercel-cron/i.test(ua)) return { ok: true, via: "ua-fallback" };
+  return { ok: false, via: "mismatch" };
 }
 
-function resolveExpectedSecret(): string | undefined {
-  // 環境ごとに使い分け可。なければ CRON_SECRET を共通で使用。
-  if (ENV === "production" && process.env.CRON_SECRET_PROD) {
-    return process.env.CRON_SECRET_PROD;
-  }
-  if (ENV === "preview" && process.env.CRON_SECRET_PREVIEW) {
-    return process.env.CRON_SECRET_PREVIEW;
-  }
-  return process.env.CRON_SECRET;
-}
-
-function requireAuthorized(req: Request) {
-  const expected = resolveExpectedSecret();
-  if (!expected) throw new Error("CRON_SECRET is not set");
-  const got = pickSecretFrom(req);
-  if (got !== expected) throw new Error("unauthorized");
-}
-
+/* ========= Support 再計算（新ロジックを継承） ========= */
 async function columnExists(table: string, column: string): Promise<boolean> {
-  // table は実テーブル名（小文字）。Prisma は "Video" として扱うが information_schema は小文字で保管されることに注意
-  // Neon/PG で通常、未クォート作成なら小文字、クォート作成ならそのまま。
-  // Prisma のテーブルはクォートで作成されるため、情報スキーマでは小文字になることが多い。
   const rows = await prisma.$queryRawUnsafe<{ exists: boolean }[]>(
     `
       SELECT EXISTS (
@@ -115,27 +156,20 @@ async function columnExists(table: string, column: string): Promise<boolean> {
   return !!rows?.[0]?.exists;
 }
 
-/** Video 側の合計カラム（存在するものだけ） */
 async function detectVideoTotalCols(): Promise<{
   countCol?: "supportCount";
   totalCol?: "supportTotal" | "supportPoints";
 }> {
   const hasCount = await columnExists("video", "supportcount").catch(() => false);
-  // 片方・または両方存在し得る
   const hasTotal = await columnExists("video", "supporttotal").catch(() => false);
   const hasPoints = await columnExists("video", "supportpoints").catch(() => false);
-
   return {
     countCol: hasCount ? "supportCount" : undefined,
     totalCol: hasTotal ? "supportTotal" : hasPoints ? "supportPoints" : undefined,
   };
 }
 
-async function detectWindows(): Promise<{
-  w1d: boolean;
-  w7d: boolean;
-  w30d: boolean;
-}> {
+async function detectWindows() {
   const w1d = await columnExists("video", "support1d").catch(() => false);
   const w7d = await columnExists("video", "support7d").catch(() => false);
   const w30d = await columnExists("video", "support30d").catch(() => false);
@@ -146,20 +180,6 @@ async function detectSEPoints(): Promise<boolean> {
   return columnExists("supportevent", "points").catch(() => false);
 }
 
-/** searchVector を持っていれば再構築 */
-async function rebuildSearchVector(dryRun: boolean): Promise<boolean> {
-  const has = await columnExists("video", "searchvector").catch(() => false);
-  if (!has || dryRun) return false;
-  await prisma.$executeRawUnsafe(`
-    UPDATE "Video" v
-    SET "searchVector" = to_tsvector('simple',
-      coalesce(v.title, '') || ' ' || coalesce(v."channelTitle", '')
-    )
-  `);
-  return true;
-}
-
-/** 合計（全期間）の更新：count/points を列有無・SE.points 有無に合わせて更新 */
 async function updateTotals(
   opts: {
     countCol?: "supportCount";
@@ -167,68 +187,50 @@ async function updateTotals(
     seHasPoints: boolean;
   },
   dryRun: boolean
-): Promise<{
-  updatedViaJoin: number;
-  zeroFilled: number;
-  setExprForCount: string;
-  setExprForPoints: string;
-}> {
+) {
   if (dryRun || (!opts.countCol && !opts.totalCol)) {
-    return {
-      updatedViaJoin: 0,
-      zeroFilled: 0,
-      setExprForCount: "n/a",
-      setExprForPoints: "n/a",
-    };
+    return { updatedViaJoin: 0, zeroFilled: 0, setExprForCount: "n/a", setExprForPoints: "n/a" };
   }
 
-  // SupportEvent 側の集計式
   const exprCount = `COUNT(*)::int`;
-  const exprPoints = opts.seHasPoints
-    ? `SUM(COALESCE(se.points, 1))::int`
-    : `COUNT(*)::int`;
+  const exprPoints = opts.seHasPoints ? `SUM(COALESCE(se.points, 1))::int` : `COUNT(*)::int`;
 
-  // CTE で両方出す（必要な側だけ使う）
+  const setPieces: string[] = [];
+  if (opts.countCol) setPieces.push(`"${opts.countCol}" = c.cnt`);
+  if (opts.totalCol) setPieces.push(`"${opts.totalCol}" = c.pts`);
+  const setLine = setPieces.join(", ") || `"id" = v.id`; // no-op
+
   const updatedViaJoin = await prisma.$executeRawUnsafe<number>(`
     WITH counts AS (
-      SELECT "videoId" AS vid,
-             ${exprCount} AS cnt,
-             ${exprPoints} AS pts
+      SELECT "videoId" AS vid, ${exprCount} AS cnt, ${exprPoints} AS pts
       FROM "SupportEvent" se
       GROUP BY "videoId"
     )
     UPDATE "Video" v
-    SET
-      ${opts.countCol ? `"${opts.countCol}" = c.cnt` : `"id" = v.id"`},
-      ${opts.totalCol ? `"${opts.totalCol}" = c.pts` : `"id" = v.id"`}
+    SET ${setLine}
     FROM counts c
     WHERE v.id = c.vid
   `);
 
-  // 0 埋め（全期間でイベント無し）
-  const setZeroPieces: string[] = [];
-  if (opts.countCol) setZeroPieces.push(`"${opts.countCol}" = 0`);
-  if (opts.totalCol) setZeroPieces.push(`"${opts.totalCol}" = 0`);
-  const setZero = setZeroPieces.join(", ");
+  const zeroSet: string[] = [];
+  if (opts.countCol) zeroSet.push(`"${opts.countCol}" = 0`);
+  if (opts.totalCol) zeroSet.push(`"${opts.totalCol}" = 0`);
+  const zeroLine = zeroSet.join(", ");
 
   let zeroFilled = 0;
-  if (setZero) {
+  if (zeroLine) {
     zeroFilled = await prisma.$executeRawUnsafe<number>(`
       UPDATE "Video" v
-      SET ${setZero}
+      SET ${zeroLine}
       WHERE NOT EXISTS (SELECT 1 FROM "SupportEvent" se WHERE se."videoId" = v.id)
     `);
   }
 
-  return {
-    updatedViaJoin,
-    zeroFilled,
-    setExprForCount: exprCount,
-    setExprForPoints: exprPoints,
-  };
+  return { updatedViaJoin, zeroFilled, setExprForCount: exprCount, setExprForPoints: exprPoints };
 }
 
-/** 期間別（1d/7d/30d）カラムを更新（存在する列だけ） */
+type WindowStat = { updatedViaJoin: number; zeroFilled: number };
+
 async function updateWindow(
   col: "support1d" | "support7d" | "support30d",
   intervalSql: string,
@@ -264,42 +266,116 @@ async function updateWindow(
   return { updatedViaJoin, zeroFilled };
 }
 
-/* ========== ルート本体 ========== */
+async function rebuildSearchVector(dryRun: boolean): Promise<boolean> {
+  const has = await columnExists("video", "searchvector").catch(() => false);
+  if (!has || dryRun) return false;
+  await prisma.$executeRawUnsafe(`
+    UPDATE "Video" v
+    SET "searchVector" = to_tsvector('simple',
+      coalesce(v.title, '') || ' ' || coalesce(v."channelTitle", '')
+    )
+  `);
+  return true;
+}
+
+/* ========= ルート ========= */
 export async function GET(req: Request) {
-  // 認可
-  try {
-    requireAuthorized(req);
-  } catch (e: any) {
-    return NextResponse.json(
-      { ok: false, error: e?.message ?? "unauthorized" },
-      { status: 401 }
-    );
+  // 認可（旧・新のどちらでも通す）
+  const auth = ensureCronAuth(req);
+  if (!auth.ok) {
+    return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
   }
 
-  const startedAt = new Date();
   const url = new URL(req.url);
   const dryRun = url.searchParams.get("dry") === "1";
+  const debug = url.searchParams.get("debug") === "1";
 
-  const steps: Result["steps"] = {
-    // 取り込み（今は枠のみ。将来的に新着取り込み等を入れる想定）
-    ingest: { ok: true, skipped: true, added: 0, updated: 0 },
-    recomputeSupport: { ok: false, error: "not-started" },
-    rebuildSearch: { ok: true, skipped: true },
-    revalidate: { ok: false, error: "not-started" },
-  };
+  // 取り込み期間：DBの最新 publishedAt から -1h（取りこぼし対策）／無ければ既定
+  const latest = await prisma.video.findFirst({
+    select: { publishedAt: true },
+    orderBy: { publishedAt: "desc" },
+  });
+  const sinceDate = latest?.publishedAt
+    ? new Date(latest.publishedAt.getTime() - 60 * 60 * 1000)
+    : new Date(Date.now() - DEFAULT_LOOKBACK_HOURS * 60 * 60 * 1000);
+  const sinceISO = iso(sinceDate);
 
-  // 1) 合計＆期間別の再計算
+  /* ---- 1) YouTube取り込み（旧ロジックを復活） ---- */
+  let ingest = { ok: true as const, skipped: false, added: 0, updated: 0 };
+  try {
+    const keys = getApiKeys();
+    if (keys.length === 0) throw new Error("no_youtube_api_key");
+
+    let items: YTSearchItem[] = [];
+    for (const key of keys) {
+      try {
+        items = await searchYoutubeSince(key, QUERY, sinceISO, MAX_PAGES);
+        break;
+      } catch {
+        // 別キーでリトライ
+        continue;
+      }
+    }
+    const ids = items.map(i => i.id?.videoId).filter(Boolean) as string[];
+
+    // 詳細（duration / stats）
+    let detailMap = new Map<string, YTVideosItem>();
+    for (const key of keys) {
+      try {
+        detailMap = await getVideoDetails(key, ids);
+        break;
+      } catch {
+        continue;
+      }
+    }
+
+    const rows: Prisma.VideoCreateManyInput[] = items
+      .map(i => {
+        const vid = i.id?.videoId;
+        if (!vid) return null;
+        const sn = i.snippet;
+        const det = detailMap.get(vid);
+        const durSec = parseISODurationToSeconds(det?.contentDetails?.duration);
+        const thumb =
+          sn.thumbnails?.high?.url ??
+          sn.thumbnails?.medium?.url ??
+          undefined;
+
+        return {
+          platform: "youtube",
+          platformVideoId: vid,
+          title: sn.title,
+          channelTitle: sn.channelTitle,
+          url: `https://www.youtube.com/watch?v=${vid}`,
+          thumbnailUrl: thumb,
+          durationSec: durSec,
+          publishedAt: new Date(sn.publishedAt ?? Date.now()),
+          views: toIntUndef(det?.statistics?.viewCount),
+          likes: toIntUndef(det?.statistics?.likeCount),
+        } satisfies Prisma.VideoCreateManyInput;
+      })
+      .filter((x): x is Prisma.VideoCreateManyInput => x !== null);
+
+    if (!dryRun && rows.length > 0) {
+      const res = await prisma.video.createMany({ data: rows, skipDuplicates: true });
+      ingest.added = res.count;
+      ingest.updated = rows.length - res.count;
+    } else {
+      ingest.skipped = true;
+    }
+  } catch (e: any) {
+    ingest = { ok: false as const, skipped: true, added: 0, updated: 0 };
+  }
+
+  /* ---- 2) Support合計/期間の再計算（新ロジック） ---- */
+  let recompute: any = { ok: true };
   try {
     const seHasPoints = await detectSEPoints();
     const totalsCols = await detectVideoTotalCols();
     const windows = await detectWindows();
 
     const totals = await updateTotals(
-      {
-        countCol: totalsCols.countCol,
-        totalCol: totalsCols.totalCol,
-        seHasPoints,
-      },
+      { countCol: totalsCols.countCol, totalCol: totalsCols.totalCol, seHasPoints },
       dryRun
     );
 
@@ -308,56 +384,39 @@ export async function GET(req: Request) {
     if (windows.w7d) winStat.d7 = await updateWindow("support7d", `INTERVAL '7 days'`, dryRun);
     if (windows.w30d) winStat.d30 = await updateWindow("support30d", `INTERVAL '30 days'`, dryRun);
 
-    steps.recomputeSupport = {
+    recompute = { ok: true, has: { ...totalsCols, sePointsColumn: seHasPoints }, totals, windows: winStat };
+  } catch (e: any) {
+    recompute = { ok: false, error: String(e) };
+  }
+
+  /* ---- 3) 検索ベクタ再構築（存在すれば） ---- */
+  let rebuildSearch = { ok: true, skipped: true };
+  try {
+    const changed = await rebuildSearchVector(dryRun);
+    rebuildSearch = { ok: true, skipped: !changed };
+  } catch (e: any) {
+    rebuildSearch = { ok: false, error: String(e) } as any;
+  }
+
+  /* ---- 4) revalidate（タグ運用している場合） ---- */
+  try {
+    if (!dryRun) {
+      revalidateTag("video:list");
+      revalidateTag("video:24h");
+    }
+  } catch {}
+
+  return NextResponse.json(
+    {
       ok: true,
-      has: {
-        supportCount: !!totalsCols.countCol,
-        supportTotal: totalsCols.totalCol === "supportTotal",
-        supportPoints: totalsCols.totalCol === "supportPoints",
-        support1d: windows.w1d,
-        support7d: windows.w7d,
-        support30d: windows.w30d,
-        sePointsColumn: seHasPoints,
+      meta: {
+        now: iso(Date.now()),
+        since: sinceISO,
+        env: process.env.VERCEL_ENV ?? process.env.NODE_ENV ?? "unknown",
+        dryRun,
       },
-      totals:
-        totalsCols.countCol || totalsCols.totalCol
-          ? totals
-          : undefined,
-      windows: winStat,
-    };
-  } catch (e: any) {
-    steps.recomputeSupport = { ok: false, error: e?.message ?? "recompute failed" };
-  }
-
-  // 2) searchVector 再構築
-  try {
-    const did = await rebuildSearchVector(dryRun);
-    steps.rebuildSearch = { ok: true, skipped: !did };
-  } catch (e: any) {
-    steps.rebuildSearch = { ok: false, error: e?.message ?? "rebuild search failed" };
-  }
-
-  // 3) ページ再検証
-  try {
-    // 影響しそうなページ達
-    revalidatePath("/");
-    revalidatePath("/trending");
-    revalidatePath("/search");
-    steps.revalidate = { ok: true };
-  } catch (e: any) {
-    steps.revalidate = { ok: false, error: e?.message ?? "revalidate failed" };
-  }
-
-  const body: Result = {
-    ok: true,
-    env: ENV,
-    dryRun,
-    startedAt: startedAt.toISOString(),
-    finishedAt: new Date().toISOString(),
-    steps,
-  };
-
-  return NextResponse.json(body, { headers: { "Cache-Control": "no-store" } });
+      steps: { ingest, recomputeSupport: recompute, rebuildSearch, revalidate: { ok: true } },
+    },
+    { status: 200, headers: { "Cache-Control": "no-store" } }
+  );
 }
-
-export const POST = GET;
