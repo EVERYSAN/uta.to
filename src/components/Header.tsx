@@ -1,7 +1,7 @@
+// src/components/Header.tsx
 import Link from 'next/link';
 import { Suspense } from 'react';
 import HeaderSearch from '@/components/HeaderSearch';
-import HeaderActions from '@/components/HeaderActions';
 
 export default function Header() {
   return (
@@ -17,12 +17,11 @@ export default function Header() {
           </nav>
         </div>
 
-        {/* 右：検索バー → ユーザーアクション */}
+        {/* 右：検索バーのみ */}
         <div className="ml-auto flex w-full max-w-xl items-center gap-3">
           <Suspense fallback={<div className="hidden md:block w-full h-10 rounded-full bg-gray-100" />}>
             <HeaderSearch defaultRange="7d" defaultShorts="all" defaultSort="hot" />
           </Suspense>
-          <HeaderActions />
         </div>
       </div>
     </header>
