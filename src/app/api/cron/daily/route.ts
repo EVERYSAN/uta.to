@@ -67,6 +67,7 @@ function expectedSecrets(): string[] {
 function ensureCronAuth(req: Request): { ok: boolean; via: string } {
   const url = new URL(req.url);
   const token = url.searchParams.get("token") ?? "";  // 旧互換
+  const qSecret = url.searchParams.get("secret") ?? ""; // ← これを追加
   const hdr =
     req.headers.get("authorization")?.replace(/^Bearer\s+/i, "") ||
     req.headers.get("x-cron-secret") ||
@@ -77,7 +78,7 @@ function ensureCronAuth(req: Request): { ok: boolean; via: string } {
   const allow = expectedSecrets();
   if (cronHdr) return { ok: true, via: "x-vercel-cron" };         // Vercel のジョブはこれで通す
   if (allow.length === 0) return { ok: true, via: "no-secret" };  // シークレット未設定なら無認証（開発用途）
-  const provided = [token, secret, hdr].filter(Boolean);
+  const provided = [token, qSecret, hdr].filter(Boolean);
   if (provided.some((p) => allow.includes(p))) return { ok: true, via: "secret" };
   if (/vercel-cron/i.test(ua)) return { ok: true, via: "ua-fallback" }; // 旧環境の保険
   return { ok: false, via: "mismatch" };
