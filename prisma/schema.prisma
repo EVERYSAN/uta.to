@@ -58,6 +58,7 @@ model Video {
   metrics          VideoMetric[]
   supportEvents  SupportEvent[]
   supportCount     Int      @default(0) // ✅ 累計応援ポイント（即時反映用）
+  creatorId        String?   // 追加：YouTubeのchannelId等を格納（nullable
 
   // 逆方向 relation
   statsSnapshots   StatsSnapshot[]
@@ -94,6 +95,7 @@ model VideoMetric {
   @@unique([videoId, date], name: "videoId_date")
   @@index([date])
 }
+
 
 
 
