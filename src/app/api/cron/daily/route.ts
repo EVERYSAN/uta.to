@@ -67,7 +67,6 @@ function expectedSecrets(): string[] {
 function ensureCronAuth(req: Request): { ok: boolean; via: string } {
   const url = new URL(req.url);
   const token = url.searchParams.get("token") ?? "";  // 旧互換
-  const secret = url.searchParams.get("secret") ?? ""; // 新
   const hdr =
     req.headers.get("authorization")?.replace(/^Bearer\s+/i, "") ||
     req.headers.get("x-cron-secret") ||
@@ -459,10 +458,6 @@ export async function GET(req: NextRequest) {
   const hoursParam = url.searchParams.get("lookbackHours");
   const sinceParam = url.searchParams.get("since");
 
-  const expected = getSecretForEnv();
-  if (!expected || secret !== expected) {
-    return fail(401, "unauthorized");
-  }
 
   const now = new Date();
   const since =
