@@ -18,11 +18,23 @@ export const revalidate = 0;
 
 /* ========= 設定 ========= */
 const QUERY = process.env.CRON_YT_QUERY ?? "歌ってみた";
+const TITLE_MUST_INCLUDE = (process.env.CRON_TITLE_MUST_INCLUDE ?? "歌ってみた")
+  .split(",").map(s => s.trim()).filter(Boolean);
 const MAX_PAGES = Number(process.env.CRON_YT_MAX_PAGES ?? 5);
 const DEFAULT_LOOKBACK_HOURS = Number(process.env.CRON_LOOKBACK_HOURS ?? 72);
 
 /* ========= 共通ユーティリティ ========= */
 const iso = (d: Date | string | number) => new Date(d).toISOString();
+
+/* ==== ヘルパ ==== */
+function normalizeTitle(s: string) {
+  return s.replace(/\s+/g, "").toLowerCase(); // 空白除去・小文字化だけ（日本語に優しい）
+}
+function isAllowedTitle(title?: string) {
+  if (!title) return false;
+  const t = normalizeTitle(title);
+  return TITLE_MUST_INCLUDE.some(kw => t.includes(normalizeTitle(kw)));
+}
 
 function getApiKeys(): string[] {
   const keys =
@@ -323,7 +335,7 @@ export async function GET(req: Request) {
     let lastErr: unknown = null;
     for (const key of keys) {
       try {
-        items = await searchYoutubeSince(key, QUERY, sinceISO, MAX_PAGES);
+        items = items.filter(i => isAllowedTitle(i?.snippet?.title));
         lastErr = null;
         break;
       } catch (e) {
