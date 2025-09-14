@@ -17,7 +17,7 @@ export const dynamic = "force-dynamic";
 export const revalidate = 0;
 
 /* ========= 設定 ========= */
-const QUERY = process.env.CRON_YT_QUERY ?? "歌ってみた|cover|covered"";
+const QUERY = process.env.CRON_YT_QUERY ?? "歌ってみた|cover|covered";
 const MAX_PAGES = Number(process.env.CRON_YT_MAX_PAGES ?? 5);
 const DEFAULT_LOOKBACK_HOURS = Number(process.env.CRON_LOOKBACK_HOURS ?? 72);
 
