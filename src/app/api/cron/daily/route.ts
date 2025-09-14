@@ -103,6 +103,33 @@ async function searchYoutubeSince(
   return items;
 }
 
+// YouTube: videos.list を 50件刻みで叩き、id => 詳細 の Map を返す
+async function getVideoDetailsBulk(
+  key: string,
+  ids: string[]
+): Promise<Record<string, any>> {
+  const out: Record<string, any> = {};
+  for (let i = 0; i < ids.length; i += 50) {
+    const chunk = ids.slice(i, i + 50);
+    if (chunk.length === 0) continue;
+
+    const url = new URL("https://www.googleapis.com/youtube/v3/videos");
+    url.searchParams.set("key", key);
+    // ← ここ重要：part は 1 文字列にカンマ区切りで
+    url.searchParams.set("part", "snippet,contentDetails,statistics");
+    url.searchParams.set("id", chunk.join(","));
+
+    // 既存の fetchJson ヘルパの形に合わせて呼ぶ（init が要らないなら引数は URL だけでOK）
+    const json = await fetchJson<any>(url.toString());
+    (json.items as any[] | undefined)?.forEach((it) => {
+      const vid = it?.id;
+      if (vid) out[vid] = it;
+    });
+  }
+  return out;
+}
+
+
 async function getVideoDetails(key: string, ids: string[]) {
   if (ids.length === 0) return new Map<string, YTVideosItem>();
   const map = new Map<string, YTVideosItem>();
