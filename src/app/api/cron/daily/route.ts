@@ -110,7 +110,7 @@ async function getVideoDetails(key: string, ids: string[]) {
     const chunk = ids.slice(i, i + 50);
     const url = new URL("https://www.googleapis.com/youtube/v3/videos");
     url.searchParams.set("key", key);
-    url.searchParams.set("part", "contentDetails,statistics");
+    url.searchParams.set("part","snippet","contentDetails,statistics");
     url.searchParams.set("id", chunk.join(","));
     const json = await fetchJson<any>(url.toString());
     (json.items as any[] | undefined)?.forEach((it) => map.set(it.id, it));
