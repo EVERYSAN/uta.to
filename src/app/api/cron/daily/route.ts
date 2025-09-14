@@ -17,7 +17,8 @@ export const dynamic = "force-dynamic";
 export const revalidate = 0;
 
 /* ========= 設定 ========= */
-const QUERY = process.env.CRON_YT_QUERY ?? "歌ってみた";
+const QUERY = process.env.CRON_YT_QUERY ?? "歌ってみた|cover|covered";
+const QUERIES: string[] = QUERY.split("|").map(s => s.trim()).filter(Boolean);
 const MAX_PAGES = Number(process.env.CRON_YT_MAX_PAGES ?? 5);
 const DEFAULT_LOOKBACK_HOURS = Number(process.env.CRON_LOOKBACK_HOURS ?? 72);
 
@@ -88,6 +89,8 @@ async function searchYoutubeSince(
     url.searchParams.set("type", "video");
     url.searchParams.set("maxResults", "50");
     url.searchParams.set("order", "date");
+    url.searchParams.set("regionCode", "JP");      // 追加: 日本地域を優先
+    url.searchParams.set("relevanceLanguage", "ja"); 
     url.searchParams.set("q", query);
     url.searchParams.set("publishedAfter", publishedAfterISO);
     if (pageToken) url.searchParams.set("pageToken", pageToken);
