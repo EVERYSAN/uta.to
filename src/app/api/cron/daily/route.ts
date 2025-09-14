@@ -438,6 +438,28 @@ export async function GET(req: Request) {
     ? new Date(latest.publishedAt.getTime() - 60 * 60 * 1000)
     : new Date(Date.now() - DEFAULT_LOOKBACK_HOURS * 60 * 60 * 1000);
   const sinceISO = iso(sinceDate);
+  // 追加：ステップの型（ゆるめでOK）
+  type IngestResult = {
+    ok: boolean;
+    fetched?: number;
+    toUpsert?: number;
+    created?: number;
+    updated?: number;
+    skipped?: boolean;
+    reason?: string;
+    dryRun?: boolean;
+  };
+  
+  type CronSteps = {
+    ingest?: IngestResult;
+    recomputeSupport?: any;
+    rebuildSearch?: any;
+    revalidate?: any;
+  };
+  
+  // 追加：steps 本体
+  const steps: CronSteps = {};
+
   steps.ingest = await ingestYouTube(sinceISO, dry);
 
 
