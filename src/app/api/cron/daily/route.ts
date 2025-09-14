@@ -42,6 +42,7 @@ async function fetchJson<T>(url: string) {
   return (await r.json()) as T;
 }
 
+
 function parseISODurationToSeconds(dur?: string): number | undefined {
   if (!dur) return undefined;
   const m = /^PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?$/.exec(dur);
@@ -188,7 +189,7 @@ async function ingestYouTube(sinceISO: string, dryRun = false) {
     if (!id) continue;
     const sn = it.snippet ?? {};
     const det = details[id];
-    const durationSec = iso8601DurationToSec(det?.contentDetails?.duration);
+    const durationSec = parseISODurationToSeconds(det?.contentDetails?.duration);
     const views = det?.statistics?.viewCount ? Number(det.statistics.viewCount) : undefined;
     const likes = det?.statistics?.likeCount ? Number(det.statistics.likeCount) : undefined;
     const thumb =
