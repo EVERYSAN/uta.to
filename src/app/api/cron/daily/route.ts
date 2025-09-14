@@ -459,7 +459,6 @@ export async function GET(req: Request) {
   
   // 追加：steps 本体
   const steps: CronSteps = {};
-  const url = new URL(req.url);
   const dryParam = url.searchParams.get("dry") ?? url.searchParams.get("dryRun");
   const dry = dryParam === "1" || dryParam === "true";
 
