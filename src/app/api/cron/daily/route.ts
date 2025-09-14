@@ -89,6 +89,8 @@ async function searchYoutubeSince(
     url.searchParams.set("type", "video");
     url.searchParams.set("maxResults", "50");
     url.searchParams.set("order", "date");
+    url.searchParams.set("regionCode", "JP");      // ← 追加：日本地域を優先
+    url.searchParams.set("relevanceLanguage", "ja"); // ← 追加：日本語コンテンツを優先
     url.searchParams.set("q", query);
     url.searchParams.set("publishedAfter", publishedAfterISO);
     if (pageToken) url.searchParams.set("pageToken", pageToken);
