@@ -110,13 +110,110 @@ async function getVideoDetails(key: string, ids: string[]) {
     const chunk = ids.slice(i, i + 50);
     const url = new URL("https://www.googleapis.com/youtube/v3/videos");
     url.searchParams.set("key", key);
-    url.searchParams.set("part","contentDetails,statistics");
+    url.searchParams.set("part","snippet","contentDetails,statistics");
     url.searchParams.set("id", chunk.join(","));
     const json = await fetchJson<any>(url.toString());
     (json.items as any[] | undefined)?.forEach((it) => map.set(it.id, it));
   }
   return map;
 }
+
+// 取り込み（ingest）：複数クエリ＆日本語フィルタ込み
+async function ingestYouTube(sinceISO: string, dryRun = false) {
+  // APIキー配列（なければスキップ返し）
+  const keysRaw = (process.env.YOUTUBE_API_KEYS ?? process.env.YOUTUBE_API_KEY ?? process.env.YT_API_KEY ?? "")
+    .split(",").map(s => s.trim()).filter(Boolean);
+  if (keysRaw.length === 0) {
+    return { ok: true, fetched: 0, toUpsert: 0, created: 0, updated: 0, skipped: true, reason: "no_youtube_key" } as const;
+  }
+  const apiKey = keysRaw[0]; // 1本だけ使う（必要ならフォールバックローテーションも可）
+
+  // 1) 複数クエリ収集 → 重複除去
+  const seen = new Map<string, YTSearchItem>();
+  for (const q of QUERIES) {
+    const its = await searchYoutubeSince(apiKey, q, sinceISO, MAX_PAGES);
+    for (const it of its) {
+      const vid = it?.id?.videoId;
+      if (vid && !seen.has(vid)) seen.set(vid, it);
+    }
+  }
+  let items = Array.from(seen.values());
+
+  // 2) 詳細取得（snippet も取得済みのはず）
+  const ids = items.map(i => i?.id?.videoId).filter(Boolean) as string[];
+  const details = ids.length ? await getVideoDetailsBulk(apiKey, ids) : {};
+
+  // 3) 日本語っぽいフィルタ
+  const JAPANESE_CHAR = /[\u3040-\u30FF\u4E00-\u9FFF]/;
+  items = items.filter((it) => {
+    const id = it?.id?.videoId;
+    const title = it?.snippet?.title ?? "";
+    const det = id ? details[id] : undefined;
+    const lang = (det?.snippet?.defaultAudioLanguage || det?.snippet?.defaultLanguage || "").toLowerCase();
+    return (lang.startsWith("ja")) || JAPANESE_CHAR.test(title);
+  });
+
+  // 4) DB upsert 用に並べ替え
+  type Row = Prisma.VideoUncheckedCreateInput;
+  const rows: Row[] = [];
+  for (const it of items) {
+    const id = it?.id?.videoId;
+    if (!id) continue;
+    const sn = it.snippet ?? {};
+    const det = details[id];
+    const durationSec = iso8601DurationToSec(det?.contentDetails?.duration);
+    const views = det?.statistics?.viewCount ? Number(det.statistics.viewCount) : undefined;
+    const likes = det?.statistics?.likeCount ? Number(det.statistics.likeCount) : undefined;
+    const thumb =
+      sn.thumbnails?.high?.url ||
+      sn.thumbnails?.medium?.url ||
+      sn.thumbnails?.default?.url ||
+      undefined;
+
+    rows.push({
+      platform: "youtube",
+      platformVideoId: id,
+      title: sn.title ?? "",
+      channelTitle: sn.channelTitle ?? "",
+      url: `https://www.youtube.com/watch?v=${id}`,
+      thumbnailUrl: thumb,
+      durationSec,
+      publishedAt: sn.publishedAt ? new Date(sn.publishedAt) : new Date(),
+      views,
+      likes,
+    });
+  }
+
+  if (dryRun) {
+    return { ok: true, fetched: items.length, toUpsert: rows.length, created: 0, updated: 0, dryRun: true } as const;
+  }
+
+  // 5) upsert（findFirst→create/update の安全版）
+  let created = 0, updated = 0;
+  for (const r of rows) {
+    const hit = await prisma.video.findFirst({
+      where: { platform: "youtube", platformVideoId: r.platformVideoId },
+      select: { id: true },
+    });
+    if (hit) {
+      await prisma.video.update({
+        where: { id: hit.id },
+        data: {
+          title: r.title, channelTitle: r.channelTitle, url: r.url,
+          thumbnailUrl: r.thumbnailUrl, durationSec: r.durationSec,
+          publishedAt: r.publishedAt, views: r.views, likes: r.likes,
+        },
+      });
+      updated++;
+    } else {
+      await prisma.video.create({ data: r });
+      created++;
+    }
+  }
+
+  return { ok: true, fetched: items.length, toUpsert: rows.length, created, updated } as const;
+}
+
 
 /* ========= Cron 認証（後方互換） ========= */
 function expectedSecrets(): string[] {
@@ -309,6 +406,8 @@ export async function GET(req: Request) {
     ? new Date(latest.publishedAt.getTime() - 60 * 60 * 1000)
     : new Date(Date.now() - DEFAULT_LOOKBACK_HOURS * 60 * 60 * 1000);
   const sinceISO = iso(sinceDate);
+  steps.ingest = await ingestYouTube(sinceISO, dry);
+
 
   /* ---- 1) YouTube取り込み（検索→詳細→createMany） ---- */
   let ingest: { ok: boolean; skipped: boolean; added: number; updated: number; error?: string } = {
