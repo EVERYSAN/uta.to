@@ -192,11 +192,15 @@ async function ingestYouTube(sinceISO: string, dryRun = false) {
     const durationSec = parseISODurationToSeconds(det?.contentDetails?.duration);
     const views = det?.statistics?.viewCount ? Number(det.statistics.viewCount) : undefined;
     const likes = det?.statistics?.likeCount ? Number(det.statistics.likeCount) : undefined;
+    const thumbs = (sn as any).thumbnails ?? {};
     const thumb =
-      sn.thumbnails?.high?.url ||
-      sn.thumbnails?.medium?.url ||
-      sn.thumbnails?.default?.url ||
+      thumbs.high?.url ||
+      thumbs.medium?.url ||
+      thumbs.default?.url ||      // ← 型を any 扱いにして解決
+      thumbs.standard?.url ||     // ← ついでに標準/最大解像度も拾う
+      thumbs.maxres?.url ||
       undefined;
+
 
     rows.push({
       platform: "youtube",
