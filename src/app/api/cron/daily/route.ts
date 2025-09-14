@@ -51,6 +51,39 @@ const YT_KEYS = (() => {
 /* ==============================
    ユーティリティ
 ============================== */
+
+
+// ---- 互換: 環境別/共通シークレットを全部見る
+function expectedSecrets(): string[] {
+  const env = process.env.VERCEL_ENV ?? process.env.NODE_ENV ?? "unknown";
+  const arr: string[] = [];
+  if (env === "production" && process.env.CRON_SECRET_PROD) arr.push(process.env.CRON_SECRET_PROD);
+  if (env === "preview" && process.env.CRON_SECRET_PREVIEW) arr.push(process.env.CRON_SECRET_PREVIEW);
+  if (process.env.CRON_SECRET) arr.push(process.env.CRON_SECRET);
+  return arr.filter(Boolean);
+}
+
+// ---- 互換: ?token / ?secret / Authorization / x-cron-secret / x-vercel-cron / UA を許可
+function ensureCronAuth(req: Request): { ok: boolean; via: string } {
+  const url = new URL(req.url);
+  const token = url.searchParams.get("token") ?? "";  // 旧互換
+  const secret = url.searchParams.get("secret") ?? ""; // 新
+  const hdr =
+    req.headers.get("authorization")?.replace(/^Bearer\s+/i, "") ||
+    req.headers.get("x-cron-secret") ||
+    "";
+  const cronHdr = req.headers.get("x-vercel-cron");
+  const ua = req.headers.get("user-agent") ?? "";
+
+  const allow = expectedSecrets();
+  if (cronHdr) return { ok: true, via: "x-vercel-cron" };         // Vercel のジョブはこれで通す
+  if (allow.length === 0) return { ok: true, via: "no-secret" };  // シークレット未設定なら無認証（開発用途）
+  const provided = [token, secret, hdr].filter(Boolean);
+  if (provided.some((p) => allow.includes(p))) return { ok: true, via: "secret" };
+  if (/vercel-cron/i.test(ua)) return { ok: true, via: "ua-fallback" }; // 旧環境の保険
+  return { ok: false, via: "mismatch" };
+}
+
 function getSecretForEnv() {
   const ve = process.env.VERCEL_ENV;
   if (ve === "production") return process.env.CRON_SECRET_PROD || process.env.CRON_SECRET;
@@ -416,11 +449,15 @@ async function ingestYouTube(sinceISO: string, dryRun = false) {
    Route Handler
 ============================== */
 export async function GET(req: NextRequest) {
+  const auth = ensureCronAuth(req as unknown as Request);
+  if (!auth.ok) {
+    return NextResponse.json({ ok: false, error: "unauthorized", via: auth.via }, { status: 401 });
+  }
+
   const url = new URL(req.url);
-  const secret = url.searchParams.get("secret") || "";
   const dry = url.searchParams.get("dry") === "1";
   const hoursParam = url.searchParams.get("lookbackHours");
-  const sinceParam = url.searchParams.get("since"); // ISO指定も可
+  const sinceParam = url.searchParams.get("since");
 
   const expected = getSecretForEnv();
   if (!expected || secret !== expected) {
