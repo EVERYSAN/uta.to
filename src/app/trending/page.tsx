@@ -1,4 +1,3 @@
-// src/app/trending/page.tsx
 "use client";
 
 import Link from "next/link";
@@ -31,10 +30,19 @@ const secsToLabel = (s?: number | null) => {
     : `${m}:${String(sec).padStart(2, "0")}`;
 };
 
+/* ========= shorts detector (fallback for client-side filter) ========= */
+const isShortVideo = (v: { url?: string; durationSec?: number | null }) => {
+  const byUrl = (v.url ?? "").toLowerCase().includes("/shorts/");
+  const dur = typeof v.durationSec === "number" ? v.durationSec : null;
+  // YouTube Shorts は60秒基準が多いが誤判定避けに少し余裕を持たせる（~70s）
+  const byDuration = dur != null && dur > 0 && dur <= 70;
+  return byUrl || byDuration;
+};
+
 /* ========= types ========= */
 type SortMode = "trending" | "support";
 type Range = "1d" | "7d" | "30d";
-type ShortsMode = "all" | "exclude";
+type ShortsMode = "all" | "exclude" | "only";
 
 type Video = {
   id: string;
@@ -81,6 +89,7 @@ function SupportBadge({ points, rank, range }: { points?: number | null; rank?: 
 
 /* ========= card ========= */
 function VideoCard({ v, range, sort }: { v: Video; range: Range; sort: SortMode }) {
+  const short = isShortVideo(v);
   return (
     <Link
       href={`/v/${v.id}`}
@@ -100,6 +109,11 @@ function VideoCard({ v, range, sort }: { v: Video; range: Range; sort: SortMode 
         {typeof v.durationSec === "number" && (
           <span className="absolute bottom-2 right-2 rounded bg-black/70 text-white text-[11px] px-1.5 py-0.5">
             {secsToLabel(v.durationSec)}
+          </span>
+        )}
+        {short && (
+          <span className="absolute top-2 left-2 rounded bg-zinc-900/80 text-white text-[10px] px-1.5 py-0.5 border border-white/10">
+            SHORTS
           </span>
         )}
       </div>
@@ -150,6 +164,7 @@ function FilterBar({
   const shortsBtns = [
     { k: "all", label: "すべて" },
     { k: "exclude", label: "ショート除外" },
+    { k: "only", label: "ショートのみ" },
   ] as const;
 
   const sortBtns = [
@@ -211,8 +226,8 @@ function TrendingPageInner() {
   const pathname = usePathname();
 
   const initRange = (search.get("range") as Range) || "1d";
-  const rawShorts = (search.get("shorts") as ShortsMode | "only") || "all";
-  const initShorts: ShortsMode = rawShorts === "exclude" ? "exclude" : "all";
+  const rawShorts = (search.get("shorts") as ShortsMode) || "all";
+  const initShorts: ShortsMode = rawShorts === "exclude" ? "exclude" : rawShorts === "only" ? "only" : "all";
   const initSort = (search.get("sort") as SortMode) || "trending";
 
   const [range, setRange] = useState<Range>(initRange);
@@ -253,7 +268,7 @@ function TrendingPageInner() {
       const qs = new URLSearchParams();
       qs.set("sort", sort);
       qs.set("range", range);
-      qs.set("shorts", shorts);
+      qs.set("shorts", shorts); // サーバ側が対応していればこれでフィルタ
       qs.set("page", String(p));
       qs.set("take", "24");
       qs.set("ts", String(Date.now())); // キャッシュ完全バイパス
@@ -261,11 +276,19 @@ function TrendingPageInner() {
       const res = await fetch(`/api/videos?${qs.toString()}`, { cache: "no-store" });
       const json: ApiList = await res.json();
       const rowsRaw = json?.items ?? [];
-      const rows = rowsRaw.map((v: any) => ({
+
+      // 念のためキー揺れ吸収 + クライアント側のショート判定フィルタ（サーバ未対応でも効く）
+      let rows = rowsRaw.map((v: any) => ({
         ...v,
-        // 念のためキー揺れ吸収
         supportPoints: v.supportPoints ?? v.support24h ?? v.support ?? 0,
-      }));
+      })) as Video[];
+
+      if (shorts === "exclude") {
+        rows = rows.filter((v) => !isShortVideo(v));
+      } else if (shorts === "only") {
+        rows = rows.filter((v) => isShortVideo(v));
+      }
+
       setItems((prev) => (replace ? rows : [...prev, ...rows]));
       if (rows.length < 24) setHasMore(false);
     } catch {
@@ -282,7 +305,6 @@ function TrendingPageInner() {
       setPage(1);
       setHasMore(true);
       fetchPage(1, true);
-      // router.refresh(); // 必要なら有効化
     };
 
     // 画面にフォーカスが戻ったら取り直し（戻る対策）
@@ -333,8 +355,8 @@ function TrendingPageInner() {
   // 初回：URL→state 同期
   useEffect(() => {
     const r = (search.get("range") as Range) || "1d";
-    const sRaw = (search.get("shorts") as ShortsMode | "only") || "all";
-    const s: ShortsMode = sRaw === "exclude" ? "exclude" : "all";
+    const sRaw = (search.get("shorts") as ShortsMode) || "all";
+    const s: ShortsMode = sRaw === "exclude" ? "exclude" : sRaw === "only" ? "only" : "all";
     const so = (search.get("sort") as SortMode) || "trending";
     setRange(r);
     setShorts(s);
