@@ -384,8 +384,7 @@ export async function GET(req: Request) {
       if (typeof likes === "number") data.likes = likes;
       // ← ここから差し替え
       data.isShort =
-        (typeof durSec === "number" ? durSec <= 61 : false) ||
-        (url?.includes("/shorts/") ?? false);
+        (typeof durSec === "number" ? durSec <= 61 : false);
       
       data.regionCode = "JP";
       
