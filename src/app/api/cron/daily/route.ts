@@ -387,11 +387,6 @@ export async function GET(req: Request) {
         (typeof durSec === "number" ? durSec <= 61 : false);
       
       data.regionCode = "JP";
-      
-      data.langHint =
-        sn.defaultLanguage ||
-        sn.defaultAudioLanguage ||
-        (JAPANESE_CHAR.test(`${sn.title ?? ""} ${sn.description ?? ""}`) ? "ja" : undefined);
 
       rows.push(data);
     }
