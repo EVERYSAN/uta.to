@@ -385,7 +385,6 @@ export async function GET(req: Request) {
       // ← ここから差し替え
       data.isShort =
         (typeof durSec === "number" ? durSec <= 61 : false) ||
-        (sn.description?.includes("#shorts") ?? false) ||
         (url?.includes("/shorts/") ?? false);
       
       data.regionCode = "JP";
