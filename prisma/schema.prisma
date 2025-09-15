@@ -58,6 +58,10 @@ model Video {
   supportEvents  SupportEvent[]
   supportCount     Int      @default(0) // ✅ 累計応援ポイント（即時反映用）
   creatorId        String?   // 追加：YouTubeのchannelId等を格納（nullable
+  // ★ 追加: 後段で消す/絞る/表示切替に使う最小カラム
+  isShort    Boolean? @default(false)  // 60秒以下なら true 目安
+  regionCode String?  @db.VarChar(2)   // "JP" を保存
+  langHint   String?  @db.VarChar(8)   // "ja" など判定のヒント
 
   // 逆方向 relation
   statsSnapshots   StatsSnapshot[]
@@ -94,6 +98,7 @@ model VideoMetric {
   @@unique([videoId, date], name: "videoId_date")
   @@index([date])
 }
+
 
 
 
