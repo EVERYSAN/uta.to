@@ -384,7 +384,7 @@ export async function GET(req: Request) {
       if (typeof likes === "number") data.likes = likes;
       // ← ここから差し替え
       data.isShort =
-        (typeof durationSec === "number" ? durationSec <= 61 : false) ||
+        (typeof durSec === "number" ? durSec <= 61 : false) ||
         (sn.description?.includes("#shorts") ?? false) ||
         (url?.includes("/shorts/") ?? false);
       
