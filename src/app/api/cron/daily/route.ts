@@ -382,6 +382,13 @@ export async function GET(req: Request) {
 
       const likes = toIntUndef(det?.statistics?.likeCount);
       if (typeof likes === "number") data.likes = likes;
+      isShort:
+        (typeof durationSec === "number" ? durationSec <= 61 : false) ||
+        (sn.description?.includes("#shorts") ?? false) ||
+        (url?.includes("/shorts/") ?? false),
+      regionCode: "JP",
+      langHint: (sn.defaultLanguage || sn.defaultAudioLanguage || (JAPANESE_CHAR.test(`${sn.title ?? ""} ${sn.description ?? ""}`) ? "ja" : undefined)),
+
 
       rows.push(data);
     }
