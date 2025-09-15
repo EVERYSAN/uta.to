@@ -382,13 +382,18 @@ export async function GET(req: Request) {
 
       const likes = toIntUndef(det?.statistics?.likeCount);
       if (typeof likes === "number") data.likes = likes;
-      isShort:
+      // ← ここから差し替え
+      data.isShort =
         (typeof durationSec === "number" ? durationSec <= 61 : false) ||
         (sn.description?.includes("#shorts") ?? false) ||
-        (url?.includes("/shorts/") ?? false),
-      regionCode: "JP",
-      langHint: (sn.defaultLanguage || sn.defaultAudioLanguage || (JAPANESE_CHAR.test(`${sn.title ?? ""} ${sn.description ?? ""}`) ? "ja" : undefined)),
-
+        (url?.includes("/shorts/") ?? false);
+      
+      data.regionCode = "JP";
+      
+      data.langHint =
+        sn.defaultLanguage ||
+        sn.defaultAudioLanguage ||
+        (JAPANESE_CHAR.test(`${sn.title ?? ""} ${sn.description ?? ""}`) ? "ja" : undefined);
 
       rows.push(data);
     }
